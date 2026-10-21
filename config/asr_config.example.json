@@ -1,0 +1,6 @@
+{
+  "secret_id": "你的 SecretId",
+  "secret_key": "你的 SecretKey",
+  "region": "ap-guangzhou",
+  "engine": "16k_zh"
+}

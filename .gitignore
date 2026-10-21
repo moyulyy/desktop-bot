@@ -1,0 +1,14 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+*.egg-info/
+build/
+dist/
+app_error.log
+config/agent_config.json
+config/asr_config.json
+workspace/
+temp/
+.reasonix/
+.venv/
+*.log
