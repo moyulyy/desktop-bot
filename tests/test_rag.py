@@ -25,3 +25,12 @@ def test_rag_ingests_html_and_hybrid_search(tmp_path):
     rows = ingestor.store.search(query, ingestor.get_embedder().embed([query])[0])
     assert rows
     assert any("火星" in row["text"] for row in rows)
+
+
+def test_rag_literature_report_tool_available(tmp_path):
+    from desktop_assistant.rag import build_rag_tools
+
+    tools = {tool.name: tool for tool in build_rag_tools(
+        str(tmp_path / "database"), base_dir=str(tmp_path), read_only=True)}
+    assert "rag_literature_report" in tools
+    assert "rag_search" in tools

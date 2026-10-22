@@ -128,3 +128,44 @@ def test_code_snippet_category_and_tool(tmp_path):
         "language": "sql", "description": "查询论文", "tags": "sql"})
     assert not added.is_error
     assert "SQL 查询" in tools["database_list"].call({"category": "code"}).content
+
+
+def test_report_pdf_collapsible_and_link(tmp_path):
+    pdf = tmp_path / "paper.pdf"
+    pdf.write_bytes(b"%PDF-1.4 placeholder")
+    content = f"## 论文信息\n\n来源：{pdf.as_posix()}\n"
+    page = build_report_html("论文报告", content)
+    assert '<details open>' in page
+    assert "PDF 文献" in page
+    assert 'href="file:' in page
+    assert "打开 PDF 原文" in page
+    assert "max-height:70vh" in page
+
+
+def test_report_repairs_double_encoded_file_uri():
+    bad = ("file:///e:/C%3A/Users/Administrator/Desktop/vv/database/pdfs/"
+           "paper.pdf")
+    page = build_report_html("链接测试", f"[打开原文]({bad})")
+    assert "file:///C:/Users/Administrator/Desktop/vv/database/pdfs/paper.pdf" in page
+    assert "e:/C%3A" not in page
+    assert ">打开原文</a>" in page
+
+
+def test_structured_literature_report_has_clickable_pdf_and_images(tmp_path):
+    from desktop_assistant.reports import build_literature_html
+
+    pdf = tmp_path / "paper.pdf"
+    pdf.write_bytes(b"%PDF-1.4")
+    image = tmp_path / "fig.png"
+    image.write_bytes(b"not-an-image")
+    page = build_literature_html("中文文献报告", [{
+        "title": "论文一", "pdf": str(pdf), "page": "p.3", "summary": "中文摘要",
+        "images": [{"path": str(image), "caption": "图 1"}],
+    }])
+    assert '<a class="pdf-link"' in page
+    assert 'file:///' in page
+    assert "打开 PDF 原文" in page
+    assert "PDF 绝对路径" in page
+    assert "onclick=\"openLightbox" in page
+    assert "浅色" not in page
+    assert "中文文献报告" in page

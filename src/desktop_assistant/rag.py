@@ -173,6 +173,44 @@ def extract_html(html_text: str, source_url: str = "") -> tuple[str, str]:
         return title, re.sub(r"[ \t]+", " ", text).strip()
 
 
+def _normalize_image_bytes(data: bytes, ext: str = "png") -> tuple[bytes, str]:
+    """把 PDF 内嵌图统一成白底 PNG，并裁掉巨大的纯色透明/黑边。"""
+    try:
+        from io import BytesIO
+        from PIL import Image, ImageChops, ImageOps
+        image = ImageOps.exif_transpose(Image.open(BytesIO(data)))
+        if getattr(image, "is_animated", False):
+            image.seek(0)
+        if image.mode in ("RGBA", "LA") or "transparency" in image.info:
+            rgba = image.convert("RGBA")
+            background = Image.new("RGB", rgba.size, "white")
+            background.paste(rgba, mask=rgba.getchannel("A"))
+            image = background
+        else:
+            image = image.convert("RGB")
+        width, height = image.size
+        if width > 24 and height > 24:
+            corner = image.getpixel((0, 0))
+            corners = [image.getpixel((0, 0)), image.getpixel((width - 1, 0)),
+                       image.getpixel((0, height - 1)),
+                       image.getpixel((width - 1, height - 1))]
+            if all(max(abs(c[i] - corner[i]) for i in range(3)) <= 12
+                   for c in corners):
+                background = Image.new("RGB", image.size, corner)
+                mask = ImageChops.difference(image, background).convert("L")
+                mask = mask.point(lambda value: 255 if value > 12 else 0)
+                bbox = mask.getbbox()
+                if bbox and (bbox[2] - bbox[0]) * (bbox[3] - bbox[1]) < 0.90 * width * height:
+                    pad = 8
+                    image = image.crop((max(0, bbox[0] - pad), max(0, bbox[1] - pad),
+                                        min(width, bbox[2] + pad), min(height, bbox[3] + pad)))
+        output = BytesIO()
+        image.save(output, "PNG", optimize=True)
+        return output.getvalue(), "png"
+    except Exception:
+        return data, ext
+
+
 def extract_pdf(path: str, ocr_images: bool = False) -> dict:
     """用 pdfplumber 提取版面/表格，pypdf 补充元数据与图片。
 
@@ -490,6 +528,13 @@ class RagStore:
                     (max(1, min(200, limit)),)).fetchall()
         return [dict(row) for row in rows]
 
+    def images_for_document(self, document_id: int, limit: int = 12) -> list[dict]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM rag_images WHERE document_id=? ORDER BY page,image_index LIMIT ?",
+                (document_id, max(1, min(50, limit)))).fetchall()
+        return [dict(row) for row in rows]
+
     def stats(self) -> dict:
         with self._connect() as conn:
             chunks = conn.execute("SELECT COUNT(*) FROM rag_chunks").fetchone()[0]
@@ -528,11 +573,12 @@ class RagIngestor:
         return digest.hexdigest()
 
     def ingest_pdf(self, path: str, title: str = "", description: str = "",
-                   tags: str = "", ocr_images: bool = False) -> dict:
+                   tags: str = "", ocr_images: bool = False,
+                   force: bool = False) -> dict:
         path = os.path.abspath(os.path.expanduser(path))
         sha = self._file_sha(path)
         existing = self.store.document_indexed(path, sha)
-        if existing:
+        if existing and not force:
             return {"document": existing, "skipped": True, "chunks": existing["chunks"]}
         parsed = extract_pdf(path, ocr_images=ocr_images)
         meta = parsed["metadata"]
@@ -549,11 +595,12 @@ class RagIngestor:
         image_dir = os.path.join(self.kb.root, "images", "papers", str(doc["id"]))
         os.makedirs(image_dir, exist_ok=True)
         for image in images:
-            name = f"page-{image.page}-img-{image.index}.{image.ext or 'png'}"
+            image_data, image_ext = _normalize_image_bytes(image.data, image.ext)
+            name = f"page-{image.page}-img-{image.index}.{image_ext or 'png'}"
             image_path = os.path.join(image_dir, name)
             try:
                 with open(image_path, "wb") as handle:
-                    handle.write(image.data)
+                    handle.write(image_data)
             except OSError:
                 continue
             image.path = image_path
@@ -645,7 +692,7 @@ class RagIngestor:
         return {"urls": done, "errors": errors}
 
     def ingest_directory(self, folder: str, recursive: bool = True,
-                         ocr_images: bool = False) -> dict:
+                         ocr_images: bool = False, force: bool = False) -> dict:
         folder = os.path.abspath(folder)
         count = errors = 0
         for dirpath, _dirs, files in os.walk(folder):
@@ -655,7 +702,7 @@ class RagIngestor:
                 path = os.path.join(dirpath, name)
                 try:
                     if name.lower().endswith(".pdf"):
-                        self.ingest_pdf(path, ocr_images=ocr_images)
+                        self.ingest_pdf(path, ocr_images=ocr_images, force=force)
                         count += 1
                     elif name.lower().endswith((".html", ".htm")):
                         self.ingest_html(path)
@@ -675,7 +722,7 @@ def build_rag_tools(database_root: str, base_dir: str = ".", read_only: bool = F
                     embedding_cache: Optional[str] = None) -> list:
     """返回 RAG 工具，供主智能体或 rag/librarian 子智能体使用。"""
     from .agent_framework import Tool, ToolResult
-    from .reports import build_report_tool
+    from .reports import build_report_tool, write_literature_report
 
     root = os.path.abspath(database_root)
     ingestor = RagIngestor(root, embedder=embedder,
@@ -722,6 +769,46 @@ def build_rag_tools(database_root: str, base_dir: str = ".", read_only: bool = F
                 f"  描述：{item.get('description') or '（待补充）'}")
         return ToolResult("\n".join(lines))
 
+    def literature_report(args):
+        query = str(args.get("query") or "").strip()
+        if not query:
+            return ToolResult("缺少 query。", is_error=True)
+        title = str(args.get("title") or "文献速查报告").strip()
+        vector = ingestor.get_embedder().embed([query])[0]
+        rows = ingestor.store.search(query, vector, int(args.get("top_k", 12) or 12))
+        if not rows:
+            return ToolResult("RAG 索引中没有找到相关文献。")
+        grouped: dict[int, dict] = {}
+        for row in rows:
+            doc_id = row.get("document_id")
+            if doc_id not in grouped:
+                grouped[doc_id] = {"row": row, "texts": [], "images": []}
+            grouped[doc_id]["texts"].append(row)
+        items = []
+        for doc_id, group in grouped.items():
+            row = group["row"]
+            source = os.path.abspath(str(row.get("source") or row.get("path") or ""))
+            label = row.get("title") or Path(source).stem
+            chunks = [(chunk.get("text") or "").strip() for chunk in group["texts"]]
+            summary = "\n\n".join(text[:1200] for text in chunks if text)
+            images = [
+                {"path": image["path"],
+                 "caption": image.get("caption") or image.get("description") or ""}
+                for image in ingestor.store.images_for_document(doc_id)
+            ]
+            items.append({
+                "title": label,
+                "pdf": source,
+                "page": f"第 {row['page']} 页" if row.get("page") else "",
+                "meta": "RAG 混合检索结果",
+                "summary": summary,
+                "images": images,
+            })
+        path = write_literature_report(
+            os.path.join(os.path.dirname(root), "temp", "reports"),
+            title, items, f"RAG 文献报告 · 检索：{query}")
+        return ToolResult(f"文献报告已生成，任务结束后会自动在浏览器打开：{path}")
+
     tools = [
         Tool("rag_search",
              "对论文/HTML 知识库做混合检索（FTS + 本地向量），返回带来源和页码的片段。",
@@ -731,6 +818,12 @@ def build_rag_tools(database_root: str, base_dir: str = ".", read_only: bool = F
               "required": ["query"]}, search),
         Tool("rag_stats", "查看 RAG 文档、分块、图片与向量后端统计。",
              {"type": "object", "properties": {}}, stats),
+        Tool("rag_literature_report",
+             "根据 RAG 检索结果生成文献 HTML 报告：包含 PDF 原文超链接、绝对路径、相关页码、文献图片和图片绝对路径。",
+             {"type": "object", "properties": {
+                 "query": {"type": "string"}, "title": {"type": "string"},
+                 "top_k": {"type": "integer"}},
+              "required": ["query"]}, literature_report),
         Tool("image_describe",
              "查看 PDF 内嵌图片的路径、页码、图注与 OCR 文本；可再交给多模态模型描述。",
              {"type": "object", "properties": {
@@ -787,13 +880,14 @@ def build_rag_tools(database_root: str, base_dir: str = ".", read_only: bool = F
              lambda args: _wrap(ingestor.ingest_urls_file(
                  _resolve(base_dir, args.get("path")), args.get("limit")), stop_event)),
         Tool("rag_reindex",
-             "重新扫描 knowledge database 的 PDF/HTML，并重建分块与向量索引。",
+             "重新扫描 knowledge database 的 PDF/HTML，并重建分块与向量索引；force=true 会重新解析已索引 PDF 以补全图片。",
              {"type": "object", "properties": {
-                 "folder": {"type": "string"}},
+                 "folder": {"type": "string"},
+                 "force": {"type": "boolean"}},
               "required": []},
              lambda args: _wrap(ingestor.ingest_directory(
-                 _resolve(base_dir, args.get("folder") or os.path.join(root, "papers"))),
-                 stop_event)),
+                 _resolve(base_dir, args.get("folder") or os.path.join(root, "papers")),
+                 force=bool(args.get("force", False))), stop_event)),
     ])
     return tools
 

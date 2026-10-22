@@ -9,7 +9,7 @@ from typing import Optional
 from .agent_framework import Tool, ToolResult
 from .database import CATEGORIES, KnowledgeBase
 from .password_vault import PasswordVault
-from .reports import build_report_tool
+from .reports import build_literature_tool, build_report_tool
 
 
 def _fmt(record: dict) -> str:
@@ -181,6 +181,7 @@ def build_database_tools(root: str, base_dir: str = ".",
                  "identifier": {"type": "string", "description": "id、相对路径或标题"}},
               "required": ["identifier"]}, inspect),
         build_report_tool(reports_dir),
+        build_literature_tool(reports_dir),
     ]
     if read_only:
         return tools

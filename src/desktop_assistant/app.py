@@ -138,6 +138,7 @@ from .local_subagents import available_subagents
 from .library_service import ChatTempStore, LibraryOrganizer, LibraryWorker
 from .database_tools import build_database_tools
 from .rag import build_rag_tools
+from .reports import chat_markdown, open_pending_report, open_report
 from .config_store import (
     DEFAULT_SYSTEM,
     DEFAULT_PREFS,
@@ -470,6 +471,7 @@ class ChatCard(QWidget):
     settings_clicked = Signal()
     suggestion_clicked = Signal(str)
     choice_selected = Signal(str, str)
+    database_add_files = Signal()
     drag_event = Signal(str, QPoint)
     resize_event = Signal(str, QPoint)
     copied = Signal(str)
@@ -1751,6 +1753,8 @@ class ChatCard(QWidget):
                     "\n\n".join(x["text"] for x in self.messages)))
             menu.addSeparator()
             menu.addAction("全选", self._select_all)
+            menu.addSeparator()
+            menu.addAction("添加文件到知识库…", self.database_add_files.emit)
             if not menu.isEmpty():
                 menu.exec(e.globalPosition().toPoint())
             e.accept()
@@ -2529,6 +2533,7 @@ class FloatingBall(QWidget):
         self.chat.settings_clicked.connect(self._open_settings)
         self.chat.suggestion_clicked.connect(self._use_suggestion)
         self.chat.choice_selected.connect(self._on_choice_selected)
+        self.chat.database_add_files.connect(self._choose_library_files)
 
         self.row = QWidget(self)        # 装输入栏里所有控件，便于整体淡入淡出
         self.row.hide()
@@ -2594,6 +2599,7 @@ class FloatingBall(QWidget):
         m.addAction("收起悬浮球" if self._expanded else "展开对话", self.toggle_panel)
         m.addAction("隐藏消息气泡" if self._chat_visible else "显示消息气泡", self.toggle_chat)
         m.addAction("在浏览器打开当前对话", self._open_chat_in_browser)
+        m.addAction("添加文件到知识库…", self._choose_library_files)
         m.addAction("立即更新 RAG 与知识库", self._manual_library_update)
         m.addAction("清空会话", self._clear_chat)
         m.addSeparator()
@@ -3340,7 +3346,6 @@ class FloatingBall(QWidget):
                                   and not self._sending)
 
     def _open_chat_in_browser(self):
-        from .reports import chat_markdown, open_report
         if not self.chat.messages:
             self._toast("当前没有可导出的对话。", self._content_global(),
                         kind="info", ttl=1800)
@@ -3812,6 +3817,8 @@ class FloatingBall(QWidget):
         self._had_error = False
         self._refresh_status()
         self._update_send_state()
+        # 报告工具只生成文件；等本轮回答结束后再打开，避免生成过程弹浏览器。
+        open_pending_report()
         if self._expanded and self._chat_visible:
             self.input.setFocus()
         else:                                    # 气泡被隐藏：横幅预览

@@ -63,7 +63,8 @@ Desktop Bot 是一个常驻桌面的 AI 悬浮球。它不像传统聊天窗口�
 | 🗂️ 本地知识库 | 分类保存 PDF、HTML/URL、图片/截图、密码、Markdown、脚本，并支持全文检索 |
 | 📚 论文 RAG | 论文/HTML 分块、本地 embedding、FTS+向量混合检索，中文/英文和页码引用 |
 | 🧾 代码片段 | `database/code/` 保存带语言、描述、标签的代码并参与检索 |
-| 🌐 浏览器报表 | 长表格/复杂结果生成 HTML，含图片、可点击引用、代码块和打印样式 |
+| 🌐 浏览器报表 | 长表格/复杂结果生成浅色 HTML，含 PDF 链接、文献图片、代码块和打印样式 |
+| 🛡️ 报告审查 | 生成前校验 PDF/图片路径、Fig 图注，拒绝整页截图冒充文献图 |
 | 🧩 选择气泡 | 需求不明确时用按钮让用户选择，点击后继续任务 |
 | 🔐 本地优先 | API Key 只保存在本机配置文件；工具操作按权限模式审批 |
 | 🪟 静默启动 | `start.vbs` 使用 `pythonw`，无黑色控制台；单实例运行 |
@@ -280,6 +281,11 @@ database/
 - 分块：约 700 tokens、100 overlap，保留页码、章节和来源；
 - Embedding：本地 `fastembed`，默认 `sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2`；模型缓存默认 `models/`；
 - 检索：SQLite FTS5 + 向量召回，RRF 融合，返回标题、路径/URL、页码和片段；
+- 报告：优先使用结构化 `literature_report` 工具，按文献传标题、PDF、页码、摘要和图片；
+  工具自动生成 PDF 短链接、绝对路径、浅色卡片和可缩放全屏图片；
+- 审核：`review_literature_items` 会移除不存在的图片、缺少 Fig/Figure 图注的图片和
+  疑似整页截图；未通过项会在报告顶部显示「审核提示」；
+- 已有 PDF 需要补全图片时使用 `rag_reindex` 的 `force=true` 重新解析；
 - 图片：PDF 内嵌图保存到 `database/images/papers/<doc-id>/`，提取图注、可选 OCR；
   `image_describe` 可查看图注/OCR，后续可接本地或远程多模态模型生成描述；
 - 规模：`sqlite-vec` 可用时使用向量索引；未安装时退化为 SQLite 向量扫描（适合开发和小库）。
@@ -388,10 +394,26 @@ Umi-OCR 不随仓库提交（体积大，按 Umi-OCR 自身许可证分发）。
 
 ### 浏览器报表
 
-当结果包含宽表格、长清单或需要打印的分析时，智能体会调用 `open_report`：
-它把 Markdown 排版成响应式 HTML（表格、代码块、打印样式），保存到
-`temp/reports/` 并在默认浏览器打开。右键悬浮球 →「在浏览器打开当前对话」
-也可以直接导出整段会话。`temp/` 已忽略，不会进入 Git。
+当结果包含宽表格、长清单或需要打印的分析时，智能体会调用 `open_report` 或
+结构化的 `literature_report`。后者接受明确的 `items` 字段：
+
+```json
+{
+  "title": "文献报告",
+  "items": [{
+    "title": "论文标题",
+    "pdf": "C:\path\paper.pdf",
+    "page": "p.6 Fig.5",
+    "summary": "中文摘要",
+    "images": [{"path": "C:\path\fig.png", "caption": "Figure 5"}]
+  }]
+}
+```
+
+报告使用浅色高对比度卡片；PDF 显示为短文本「打开 PDF 原文」和绝对路径；
+图片支持点击全屏、滚轮缩放、拖动平移、双击复位和 `Esc` 退出。
+生成时只写 `temp/reports/`，等本轮智能体回答结束后再自动打开浏览器。
+`temp/` 已忽略，不会进入 Git。
 
 ### 自定义角色
 
@@ -435,6 +457,8 @@ Umi-OCR 不随仓库提交（体积大，按 Umi-OCR 自身许可证分发）。
 | `open_app` | 打开应用、文件或 URL |
 | `workspace_*` | 工作空间信息、写文件、列目录、运行 Python |
 | `database_add_code` | 保存带语言、描述和标签的代码片段到 `database/code/` |
+| `rag_literature_report` | 根据检索结果生成带 PDF 超链接、绝对路径、页码和文献图片的 HTML 报告 |
+| `literature_report` | 结构化 function-calling 文献报告；自动审核 PDF、Fig 图注与图片路径 |
 
 ### 权限模式
 
@@ -478,7 +502,7 @@ src/desktop_assistant/
   ocr.py              Umi-OCR HTTP API + Tesseract 回退
   password_vault.py   Windows DPAPI 加密密码保险库
   rag.py              论文/HTML 分块、embedding、混合检索、PDF/图片抽取
-  reports.py          Markdown → 独立 HTML 浏览器报表
+  reports.py          结构化/ Markdown 文献报告、审核门禁与全屏图片查看
 config/               agent_config.example.json、asr_config.example.json
 vendor/everything/    Everything 1.5 便携版与 SDK3 DLL
 database/             本地知识库；仓库只保留目录和 README，真实内容已忽略
@@ -501,7 +525,8 @@ requirements-rag.txt  可选 PDF / HTML / embedding / 向量索引 / OCR 依赖
 - `permission_mode` + `can_use_tool`：替换权限策略；
 - `computer_tools.build_computer_tools`：扩展桌面操作工具；
 - `database.KnowledgeBase`：扩展知识库索引、分类与检索；
-- `reports.open_report`：把任意 Markdown 导出为浏览器报表；
+- `reports.open_report` / `literature_report`：导出 Markdown 或结构化文献报告；
+- `reports.review_literature_items`：扩展 PDF/图片/Fig 图注审核规则；
 - `rag.build_rag_tools`：接入论文/HTML 的 RAG 检索与导入；
 - `library_service.LibraryOrganizer`：扩展知识库整理/导入流程；
 - `ocr.UmiOCR`：替换或扩展图片 OCR 后端；

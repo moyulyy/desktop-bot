@@ -84,7 +84,9 @@ def available_subagents(cwd: str, workspace: str | None = None,
             "没有足够证据时明确说“知识库中没有足够信息”。需要新增资料时使用 "
             "rag_ingest_pdf / rag_ingest_html / rag_ingest_urls；URL 只在导入时抓取一次，"
             "不要重复爬取。图表可先查 image_describe 的图注和 OCR，再结合上下文解释；"
-            "复杂对比或长表格用 open_report 在浏览器打开。"),
+            "文献报告必须使用 rag_literature_report/literature_report 的结构化字段："
+            "每张图必须有 Figure/图号图注，不能把整页 PDF 当作 Fig；无法核验的图片不要放。"
+            "证据不足时明确说明，不要补写推断值。"),
         tools=rag_tools,
         max_turns=12,
     ))
