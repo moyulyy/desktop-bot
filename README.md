@@ -338,6 +338,8 @@ PYTHONPATH=src python -m desktop_assistant.rag_cli stats
 - 手动「立即更新 RAG 与知识库」会立即处理 `temp/` 附件、迁移到 database，并在成功后
   清空对应的 `temp/chat` 临时数据。
 - 知识库写入和整理路径都经过根目录校验，不会写到 database 之外。
+- 仓库只提交 `database/README.md` 和各分类的 `.gitkeep`，不提交 PDF、图片、密码库、
+  SQLite 索引或知识库笔记；详见 [`database/README.md`](database/README.md)。
 
 ### OCR：Umi-OCR / Tesseract
 
@@ -349,10 +351,40 @@ PDF 内嵌图片和附件图片支持 OCR。优先使用 [Umi-OCR](https://githu
 $env:UMI_OCR_URL = "http://127.0.0.1:1224"
 ```
 
+#### Umi-OCR 安装与配置
+
+Umi-OCR 不随仓库提交（体积大，按 Umi-OCR 自身许可证分发）。使用前：
+
+1. 从 [Umi-OCR Releases](https://github.com/hiroi-sora/Umi-OCR/releases) 下载
+   `Umi-OCR_Paddle_v2.0.0`（或 Rapid 版）；
+2. 解压到项目根目录：
+   ```text
+   Umi-OCR_Paddle_v2.0.0/
+     Umi-OCR.exe
+     UmiOCR-data/
+   ```
+3. 启动一次 Umi-OCR，在「全局设置 → 服务」确认：
+   ```text
+   server.enable=true
+   server.host=127.0.0.1
+   server.port=1224
+   ```
+   默认配置已开启 HTTP 服务；
+4. 关闭 Umi-OCR，之后双击 `start.vbs` 会自动启动它并设置：
+   ```text
+   UMI_OCR_URL=http://127.0.0.1:1224
+   ```
+5. 若放在其他目录，可修改 `start.vbs` 中的候选路径；若端口不同，先设置
+   `$env:UMI_OCR_URL`。可访问以下地址确认服务：
+   ```text
+   http://127.0.0.1:1224/api/ocr/get_options
+   ```
+
 `ocr.py` 会依次尝试 Umi-OCR 的 `/api/ocr` 常见 base64 请求格式，并兼容
 `data/text/ocr/result` 等响应结构；Umi-OCR 不可用时回退到本机 Tesseract
-（`chi_sim+eng`），仍失败则保留图片和图注而不阻断入库。图片资产保存在
-`database/images/papers/<doc-id>/`，`image_describe` 可查看图注/OCR/描述。
+（`chi_sim+eng`），仍失败则保留图片和图注而不阻断入库。Tesseract 需要额外安装
+程序及中文语言包。图片资产保存在 `database/images/papers/<doc-id>/`，
+`image_describe` 可查看图注/OCR/描述。
 
 ### 浏览器报表
 
@@ -449,7 +481,7 @@ src/desktop_assistant/
   reports.py          Markdown → 独立 HTML 浏览器报表
 config/               agent_config.example.json、asr_config.example.json
 vendor/everything/    Everything 1.5 便携版与 SDK3 DLL
-database/             本地知识库（运行时创建，已忽略）
+database/             本地知识库；仓库只保留目录和 README，真实内容已忽略
 tests/                框架 + 配置 + 离屏 UI 冒烟测试
 temp/                 截图 / 临时脚本 / 临时笔记（已忽略）
 start.vbs             无控制台静默启动器

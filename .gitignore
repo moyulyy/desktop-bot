@@ -12,7 +12,6 @@ temp/
 .reasonix/
 .venv/
 *.log
-database/
 models/
 
 # 本地运行的 OCR 二进制与临时分析文件
@@ -23,3 +22,27 @@ scan_cer.py
 scan_ctx.py
 render_stl.py
 tools/
+
+# 知识库只保留目录结构，不提交真实内容
+database/**
+!database/README.md
+!database/pdfs/
+!database/pdfs/.gitkeep
+!database/html/
+!database/html/.gitkeep
+!database/urls/
+!database/urls/.gitkeep
+!database/images/
+!database/images/.gitkeep
+!database/screenshots/
+!database/screenshots/.gitkeep
+!database/passwords/
+!database/passwords/.gitkeep
+!database/markdown/
+!database/markdown/.gitkeep
+!database/code/
+!database/code/.gitkeep
+!database/scripts/
+!database/scripts/.gitkeep
+!database/inbox/
+!database/inbox/.gitkeep
