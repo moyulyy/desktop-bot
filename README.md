@@ -60,6 +60,10 @@ Desktop Bot 是一个常驻桌面的 AI 悬浮球。它不像传统聊天窗口�
 | 🎙️ 语音输入 | 腾讯云一句话识别，录音后转为文字 |
 | 🔎 Everything 检索 | 基于 Everything 1.5 SDK3，支持文件名、扩展名和内容搜索 |
 | 🖱️ 电脑操作 | 截图、鼠标、键盘、窗口切换、打开应用，工作空间保存临时文件 |
+| 🗂️ 本地知识库 | 分类保存 PDF、HTML/URL、图片/截图、密码、Markdown、脚本，并支持全文检索 |
+| 📚 论文 RAG | 论文/HTML 分块、本地 embedding、FTS+向量混合检索，中文/英文和页码引用 |
+| 🧾 代码片段 | `database/code/` 保存带语言、描述、标签的代码并参与检索 |
+| 🌐 浏览器报表 | 长表格/复杂结果生成 HTML，含图片、可点击引用、代码块和打印样式 |
 | 🧩 选择气泡 | 需求不明确时用按钮让用户选择，点击后继续任务 |
 | 🔐 本地优先 | API Key 只保存在本机配置文件；工具操作按权限模式审批 |
 | 🪟 静默启动 | `start.vbs` 使用 `pythonw`，无黑色控制台；单实例运行 |
@@ -78,11 +82,14 @@ Desktop Bot 是一个常驻桌面的 AI 悬浮球。它不像传统聊天窗口�
    ```
 
 3. 双击 **`run.bat`**，首次会自动安装依赖并启动；
-4. 之后日常双击 **`start.vbs`**（可发送到桌面作为快捷方式）。它通过 `pythonw.exe`
-   静默运行，不会出现黑色控制台窗口。
+4. 之后日常双击 **`start.vbs`**（可发送到桌面作为快捷方式）。它会优先使用
+   `desktop-rag` conda 环境中的 `pythonw.exe`，找不到时回退到系统 Python；通过
+   `pythonw.exe` 静默运行，不会出现黑色控制台窗口。若本机存在
+   `Umi-OCR_Paddle_v2.0.0/Umi-OCR.exe`，还会同时启动 Umi-OCR 并设置
+   `UMI_OCR_URL`（默认 `http://127.0.0.1:1224`）。
 
 > `run.bat` 只在首次安装/修复依赖时需要。程序为单实例，重复启动会安静退出。
-> 如果静默启动异常，查看项目根目录的 `app_error.log`。
+> 如果静默启动异常，查看 `temp/app_error.log`。
 
 ### 方式二：命令行
 
@@ -191,6 +198,8 @@ PYTHONPATH=src python -m desktop_assistant
 | `writer` | 整理中文文案 | `get_current_time` |
 | `finder` | Everything 本地文件检索 | `search_files`、`read_file`、`list_directory` |
 | `computer` | 屏幕截图、鼠标/键盘、窗口与应用操作 | `screen_capture`、`mouse_*`、`keyboard_*`、`focus_window`、`workspace_*` |
+| `librarian` | 知识库整理：分类、描述、标签、索引、检索 | `database_*`、`vault_*`、`open_report`、文件读取 |
+| `rag` | 论文/HTML 的 RAG 检索、导入与引用 | `rag_*`、`image_describe`、`open_report` |
 
 ### finder：Everything 本地检索
 
@@ -227,6 +236,130 @@ temp/
 
 鼠标、键盘、截图、运行脚本等操作在默认权限模式下会请求授权，支持「允许一次」和
 「总是允许」。涉及删除文件、关闭未保存文档、付款或关机时，子智能体被要求先确认。
+
+### librarian：本地知识库
+
+`librarian` 子智能体负责把资料整理进项目下的 `database/`（可被 `.gitignore` 忽略）：
+
+```text
+database/
+  pdfs/           PDF 文档
+  html/           HTML 文件
+  urls/           URL 记录（urls.jsonl）
+  images/         图片
+  screenshots/    截图
+  passwords/      密码保险库（Windows DPAPI 加密）
+  markdown/       Markdown 笔记
+  code/           代码片段（带语言/描述/标签）
+  scripts/        脚本
+  inbox/          待整理文件
+  index.sqlite3   SQLite FTS5 索引
+  catalog.json    文件路径、类型、描述、标签
+  INDEX.md        可读目录
+```
+
+常用流程：
+
+- 把文件放进 `database/inbox/`，让 librarian 分类、补描述和标签；
+- 对 AI 说“把这份 PDF 整理进知识库”，它会调用 `database_add_file`；
+- “查一下知识库里关于预算的资料”会调用 `database_search`；
+- 网页地址用 `database_add_url` 记录；
+- 密码用 `vault_add` 加密保存，`vault_list` 只返回服务名/用户名，绝不明文落盘；
+- 整理后用 `database_reindex` 更新索引和 `INDEX.md`。
+
+知识库路径可在「设置 → 子智能体 → 知识库目录」修改。索引使用 SQLite FTS5
+（trigram，支持中文子串），不需要外部服务；设计上借鉴 gbrain 的“有来源、可纠正、
+可检索”思路。密码库使用当前 Windows 用户的 DPAPI 加密，只在本机可用。
+
+### 论文与 HTML RAG
+
+`rag` 子智能体面向中文/英文论文和网页，默认按 1 万篇论文的规模设计：
+
+- PDF：`pdfplumber` 提取版面与表格，`pypdf` 补充元数据和内嵌图片；
+- HTML：优先 `trafilatura` 提取正文；URL 只在导入时抓取一次，原始 HTML 缓存到 `database/html/`；
+- 分块：约 700 tokens、100 overlap，保留页码、章节和来源；
+- Embedding：本地 `fastembed`，默认 `sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2`；模型缓存默认 `models/`；
+- 检索：SQLite FTS5 + 向量召回，RRF 融合，返回标题、路径/URL、页码和片段；
+- 图片：PDF 内嵌图保存到 `database/images/papers/<doc-id>/`，提取图注、可选 OCR；
+  `image_describe` 可查看图注/OCR，后续可接本地或远程多模态模型生成描述；
+- 规模：`sqlite-vec` 可用时使用向量索引；未安装时退化为 SQLite 向量扫描（适合开发和小库）。
+
+#### 安装与模型
+
+```bash
+conda create -n desktop-rag python=3.11
+conda activate desktop-rag
+python -m pip install -r requirements.txt -r requirements-rag.txt
+```
+
+首次 embedding 会下载多语言模型
+`sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2`（384 维，约 240 MB）
+到 `models/`（已加入 `.gitignore`）。PDF/OCR 依赖是可选的；没有安装 `fastembed` 时
+会回退到确定性的 `HashEmbedder`，便于离线测试，但不适合生产语义检索。
+
+#### 添加论文/文本
+
+在项目根目录执行：
+
+```bash
+# 单篇 PDF
+PYTHONPATH=src python -m desktop_assistant.rag_cli ingest-pdf "D:\papers\paper.pdf"
+
+# 单篇 txt / md
+PYTHONPATH=src python -m desktop_assistant.rag_cli ingest-text "D:
+otes
+ote.md"
+
+# 批量导入整个目录（PDF、HTML、txt、md）
+PYTHONPATH=src python -m desktop_assistant.rag_cli ingest-dir database/papers
+
+# URL 列表（JSONL：{"url": "...", "title": "..."}）；只在导入时抓取
+PYTHONPATH=src python -m desktop_assistant.rag_cli ingest-urls database/urls/urls.jsonl
+
+# 检索与统计
+PYTHONPATH=src python -m desktop_assistant.rag_cli search "火星任务预算" --top-k 8
+PYTHONPATH=src python -m desktop_assistant.rag_cli stats
+```
+
+也可以直接把 PDF 放进 `database/papers/`，然后在对话里让 `rag` 子智能体执行
+`rag_ingest_pdf` 或 `rag_reindex`。重复导入会按源文件 SHA 跳过，10k 篇可以分批跑。
+
+### 知识库入口、附件与定时整理
+
+- 悬浮球右侧的 ✨ 按钮：选择多个文件，自动按后缀放入 `database/pdfs`、`images`、
+  `screenshots`、`markdown`、`scripts` 等目录，并建立 RAG 索引。
+- 输入框左侧的 ＋：添加文件、图片、截屏，或直接 `Ctrl+V` 粘贴图片/文件；
+  附件先进入 `temp/chat/files/`，随消息记录到 `temp/chat/messages.jsonl`。
+- 右键 →「立即更新 RAG 与知识库」：把临时附件/对话记录移入 database，跑完整整理，
+  显示进度条，成功后关闭进度并清空对应 `temp/chat` 数据。
+- 默认每天凌晨 **02:00**（应用运行时）自动整理一次；自动任务读取 `temp/` 和
+  `database/`，写入仅限 `database/` 及其子路径。同一日期只运行一次；错过 02:00 时
+  在 02:00–02:05 补跑。
+- 手动「立即更新 RAG 与知识库」会立即处理 `temp/` 附件、迁移到 database，并在成功后
+  清空对应的 `temp/chat` 临时数据。
+- 知识库写入和整理路径都经过根目录校验，不会写到 database 之外。
+
+### OCR：Umi-OCR / Tesseract
+
+PDF 内嵌图片和附件图片支持 OCR。优先使用 [Umi-OCR](https://github.com/hiroi-sora/Umi-OCR)
+的 HTTP API：
+
+```powershell
+# Umi-OCR 启动 HTTP 服务后设置（默认端口以 Umi-OCR 设置为准）
+$env:UMI_OCR_URL = "http://127.0.0.1:1224"
+```
+
+`ocr.py` 会依次尝试 Umi-OCR 的 `/api/ocr` 常见 base64 请求格式，并兼容
+`data/text/ocr/result` 等响应结构；Umi-OCR 不可用时回退到本机 Tesseract
+（`chi_sim+eng`），仍失败则保留图片和图注而不阻断入库。图片资产保存在
+`database/images/papers/<doc-id>/`，`image_describe` 可查看图注/OCR/描述。
+
+### 浏览器报表
+
+当结果包含宽表格、长清单或需要打印的分析时，智能体会调用 `open_report`：
+它把 Markdown 排版成响应式 HTML（表格、代码块、打印样式），保存到
+`temp/reports/` 并在默认浏览器打开。右键悬浮球 →「在浏览器打开当前对话」
+也可以直接导出整段会话。`temp/` 已忽略，不会进入 Git。
 
 ### 自定义角色
 
@@ -269,6 +402,7 @@ temp/
 | `focus_window` / `list_windows` | 窗口切换与枚举 |
 | `open_app` | 打开应用、文件或 URL |
 | `workspace_*` | 工作空间信息、写文件、列目录、运行 Python |
+| `database_add_code` | 保存带语言、描述和标签的代码片段到 `database/code/` |
 
 ### 权限模式
 
@@ -306,13 +440,22 @@ src/desktop_assistant/
   everything_search.py Everything 1.5 SDK3 named-pipe 检索客户端
   computer_tools.py   截图、鼠标、键盘、窗口与工作空间工具
   local_subagents.py  内置子智能体装配
+  database.py         知识库、SQLite FTS5 索引与目录导出
+  database_tools.py   知识库/密码库/浏览器报告的 Agent 工具
+  library_service.py  附件临时区、文件入库、每日/手动整理 Worker
+  ocr.py              Umi-OCR HTTP API + Tesseract 回退
+  password_vault.py   Windows DPAPI 加密密码保险库
+  rag.py              论文/HTML 分块、embedding、混合检索、PDF/图片抽取
+  reports.py          Markdown → 独立 HTML 浏览器报表
 config/               agent_config.example.json、asr_config.example.json
 vendor/everything/    Everything 1.5 便携版与 SDK3 DLL
+database/             本地知识库（运行时创建，已忽略）
 tests/                框架 + 配置 + 离屏 UI 冒烟测试
 temp/                 截图 / 临时脚本 / 临时笔记（已忽略）
 start.vbs             无控制台静默启动器
 run.bat               首次安装依赖并静默启动
 pyproject.toml        src 布局、入口点与依赖声明
+requirements-rag.txt  可选 PDF / HTML / embedding / 向量索引 / OCR 依赖
 ```
 
 ### 扩展点
@@ -325,6 +468,11 @@ pyproject.toml        src 布局、入口点与依赖声明
 - `ChatCard.add_choice`：渲染带按钮的选择气泡；
 - `permission_mode` + `can_use_tool`：替换权限策略；
 - `computer_tools.build_computer_tools`：扩展桌面操作工具；
+- `database.KnowledgeBase`：扩展知识库索引、分类与检索；
+- `reports.open_report`：把任意 Markdown 导出为浏览器报表；
+- `rag.build_rag_tools`：接入论文/HTML 的 RAG 检索与导入；
+- `library_service.LibraryOrganizer`：扩展知识库整理/导入流程；
+- `ocr.UmiOCR`：替换或扩展图片 OCR 后端；
 - `everything_search.EverythingClient`：替换/扩展本地检索实现。
 
 ## 🧪 开发与测试

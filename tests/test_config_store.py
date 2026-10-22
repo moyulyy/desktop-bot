@@ -120,3 +120,10 @@ def test_workspace_defaults_and_relative_paths():
 
     absolute = os.path.join(cs.PROJECT_ROOT, "absolute-work")
     assert cs.normalize_agent_config({"workspace": absolute})["workspace"] == absolute
+
+
+def test_database_defaults_to_project_database():
+    cfg = cs.normalize_agent_config({})
+    assert cfg["database"] == os.path.join(cs.PROJECT_ROOT, "database")
+    custom = cs.normalize_agent_config({"database": "kb"})
+    assert custom["database"] == os.path.join(cs.PROJECT_ROOT, "kb")

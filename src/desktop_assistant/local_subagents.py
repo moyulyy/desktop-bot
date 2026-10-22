@@ -9,15 +9,21 @@ try:  # 包内导入
     from .agent_framework import SubagentSpec, default_subagents, default_tools
     from .everything_search import build_search_tool
     from .computer_tools import build_computer_tools
+    from .database_tools import build_database_tools
+    from .rag import build_rag_tools
 except ImportError:  # 兼容直接以脚本方式运行
     from agent_framework import SubagentSpec, default_subagents, default_tools
     from everything_search import build_search_tool
     from computer_tools import build_computer_tools
+    from database_tools import build_database_tools
+    from rag import build_rag_tools
 
 
 def available_subagents(cwd: str, workspace: str | None = None,
-                        stop_event=None) -> list[SubagentSpec]:
-    """内置角色 + finder（Everything）+ computer（电脑操作）。"""
+                        database: str | None = None,
+                        stop_event=None, embedding_model: str | None = None,
+                        embedding_cache: str | None = None) -> list[SubagentSpec]:
+    """内置角色 + finder（Everything）+ computer（电脑操作）+ librarian（知识库整理）。"""
     specs = list(default_subagents(cwd, stop_event=stop_event))
     base = {tool.name: tool for tool in default_tools(cwd, stop_event=stop_event)}
     search_tool = build_search_tool(cwd, stop_event=stop_event)
@@ -50,6 +56,54 @@ def available_subagents(cwd: str, workspace: str | None = None,
             "需要向用户展示截图时，在最终回答中包含 ![截图](截图绝对路径)。"),
         tools=cs_tools,
         max_turns=10,
+    ))
+    db_path = os.path.abspath(os.path.expanduser(
+        database or os.path.join(cwd, "database")))
+    db_tools = build_database_tools(db_path, base_dir=cwd,
+                                    stop_event=stop_event)
+    for name in ("read_file", "list_directory", "get_current_time"):
+        tool = base.get(name)
+        if tool is not None:
+            db_tools.append(tool)
+    rag_tools = build_rag_tools(
+        db_path, base_dir=cwd, read_only=False, stop_event=stop_event,
+        embedding_model=embedding_model or "intfloat/multilingual-e5-small",
+        embedding_cache=embedding_cache)
+    for name in ("read_file", "list_directory", "get_current_time"):
+        tool = base.get(name)
+        if tool is not None:
+            rag_tools.append(tool)
+    specs.append(SubagentSpec(
+        name="rag",
+        description=(
+            "论文/HTML 知识库 RAG：解析 PDF 正文、表格和内嵌图片，按页分块，"
+            "建立本地 embedding 与混合检索，回答时给出文件/页码/URL 来源。"),
+        system_prompt=(
+            "你是论文与网页知识库检索助手。检索优先用 rag_search，不要凭记忆编造；"
+            "回答必须给出标题、文件路径或 URL，PDF 还要给页码。中文和英文论文都要支持。"
+            "没有足够证据时明确说“知识库中没有足够信息”。需要新增资料时使用 "
+            "rag_ingest_pdf / rag_ingest_html / rag_ingest_urls；URL 只在导入时抓取一次，"
+            "不要重复爬取。图表可先查 image_describe 的图注和 OCR，再结合上下文解释；"
+            "复杂对比或长表格用 open_report 在浏览器打开。"),
+        tools=rag_tools,
+        max_turns=12,
+    ))
+    specs.append(SubagentSpec(
+        name="librarian",
+        description=(
+            "整理本地知识库：把文件、网页 URL、图片/截图、Markdown 和脚本"
+            "分类入库，补全标题/描述/标签，并维护路径索引与全文检索。"),
+        system_prompt=(
+            "你是本地知识库整理员。工作目录是用户的 database 知识库："
+            + db_path + "。用户给出文件或 URL 时，先判断类型，再调用 "
+            "database_add_file / database_add_url 入库，并补全简洁标题、"
+            "中文描述和 2-5 个标签；不确定分类时先 database_inspect 或读取内容，"
+            "不要臆造。需要找资料时用 database_search；整理完用 database_reindex "
+            "更新索引。密码只能用 vault_add 加密保存，绝不能写入 Markdown、"
+            "描述或标签；不要在最终回答中回显密码。输出时列出类型、路径、"
+            "描述和标签，复杂清单可用 open_report 在浏览器展示。"),
+        tools=db_tools,
+        max_turns=12,
     ))
     specs.append(SubagentSpec(
         name="finder",

@@ -359,7 +359,10 @@ class AgentOptions:
 # task 只负责委派，子智能体真正使用的工具仍会逐个走权限校验。
 SAFE_TOOLS = {"get_current_time", "read_file", "list_directory", "web_fetch",
               "task", "ask_user", "screen_info", "list_windows",
-              "workspace_info", "workspace_list", "wait"}
+              "workspace_info", "workspace_list", "wait",
+              "database_stats", "database_search", "database_list",
+              "database_inspect", "open_report", "rag_search", "rag_stats",
+              "image_describe"}
 # 仅在 acceptEdits / bypassPermissions 下放行的写操作
 EDIT_TOOLS = {"write_file", "edit_file"}
 

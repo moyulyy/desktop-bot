@@ -45,6 +45,12 @@ DEFAULT_AGENT_CONFIG: dict[str, Any] = {
     "permission_mode": "default",
     "stream": True,
     "workspace": "temp",
+    "database": "database",
+    "embedding_model": "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2",
+    "embedding_cache": "models",
+    "rag_top_k": 8,
+    "rag_chunk_tokens": 700,
+    "rag_overlap": 100,
     "subagents": {
         "enabled": True,
         "max_depth": 2,
@@ -166,6 +172,21 @@ def normalize_agent_config(cfg: dict | None) -> dict:
     if not os.path.isabs(workspace):
         workspace = os.path.join(PROJECT_ROOT, workspace)
     out["workspace"] = os.path.abspath(workspace)
+    database = str(cfg.get("database") or "database").strip()
+    database = os.path.expandvars(os.path.expanduser(database))
+    if not os.path.isabs(database):
+        database = os.path.join(PROJECT_ROOT, database)
+    out["database"] = os.path.abspath(database)
+    out["embedding_model"] = str(cfg.get("embedding_model") or
+                                 DEFAULT_AGENT_CONFIG["embedding_model"]).strip()
+    cache = str(cfg.get("embedding_cache") or "models").strip()
+    cache = os.path.expandvars(os.path.expanduser(cache))
+    if not os.path.isabs(cache):
+        cache = os.path.join(PROJECT_ROOT, cache)
+    out["embedding_cache"] = os.path.abspath(cache)
+    out["rag_top_k"] = max(1, min(30, int(cfg.get("rag_top_k", 8) or 8)))
+    out["rag_chunk_tokens"] = max(200, min(2000, int(cfg.get("rag_chunk_tokens", 700) or 700)))
+    out["rag_overlap"] = max(0, min(400, int(cfg.get("rag_overlap", 100) or 0)))
 
     sub = cfg.get("subagents")
     sub = sub if isinstance(sub, dict) else {}

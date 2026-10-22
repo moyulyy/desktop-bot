@@ -12,3 +12,14 @@ temp/
 .reasonix/
 .venv/
 *.log
+database/
+models/
+
+# 本地运行的 OCR 二进制与临时分析文件
+Umi-OCR_Paddle_v2.0.0/
+cer_ctx.txt
+cer_hits.txt
+scan_cer.py
+scan_ctx.py
+render_stl.py
+tools/

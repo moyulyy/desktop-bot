@@ -312,3 +312,14 @@ def test_run_shell_prefers_git_bash_and_allows_git_commands():
     auto = tools["run_shell"].call({"command": "git --version", "timeout": 20})
     assert not auto.is_error
     assert "git version" in auto.content.lower()
+
+
+def test_librarian_subagent_is_available(tmp_path):
+    from desktop_assistant.local_subagents import available_subagents
+
+    specs = available_subagents(os.getcwd(), database=str(tmp_path / "database"))
+    librarian = next(spec for spec in specs if spec.name == "librarian")
+    names = {tool.name for tool in librarian.tools}
+    assert {"database_search", "database_add_file", "database_note",
+            "vault_add", "vault_get", "open_report"}.issubset(names)
+    assert str(tmp_path / "database") in librarian.system_prompt

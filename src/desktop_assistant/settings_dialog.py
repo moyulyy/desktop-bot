@@ -840,6 +840,21 @@ class SettingsDialog(GlassDialog):
         if path:
             self.workspace.setText(path)
 
+    def _choose_database(self):
+        start = self.database_path.text().strip() or BASE_DIR
+        path = QFileDialog.getExistingDirectory(self, "选择知识库目录", start)
+        if path:
+            self.database_path.setText(path)
+
+    def _open_database(self):
+        path = os.path.expanduser(self.database_path.text().strip()
+                                  or os.path.join(BASE_DIR, "database"))
+        try:
+            os.makedirs(path, exist_ok=True)
+        except OSError:
+            pass
+        QDesktopServices.openUrl(QUrl.fromLocalFile(path))
+
     def _open_workspace(self):
         path = os.path.expanduser(self.workspace.text().strip()
                                   or os.path.join(BASE_DIR, "temp"))
@@ -879,6 +894,24 @@ class SettingsDialog(GlassDialog):
         open_ws.clicked.connect(self._open_workspace)
         wl.addWidget(open_ws, 0, Qt.AlignmentFlag.AlignBottom)
         c.addWidget(ws_row)
+        db_row = QWidget()
+        dl = QHBoxLayout(db_row)
+        dl.setContentsMargins(0, 0, 0, 0)
+        dl.setSpacing(8)
+        self.database_path = QLineEdit(str(self.agent_cfg.get("database") or ""))
+        self.database_path.setPlaceholderText("本地知识库目录")
+        dl.addWidget(_field("知识库目录", self.database_path,
+                            "PDF、HTML/URL、图片/截图、Markdown、脚本和加密密码库。"),
+                     1)
+        browse_db = QPushButton("选择…")
+        browse_db.setCursor(Qt.CursorShape.PointingHandCursor)
+        browse_db.clicked.connect(self._choose_database)
+        dl.addWidget(browse_db, 0, Qt.AlignmentFlag.AlignBottom)
+        open_db = QPushButton("打开")
+        open_db.setCursor(Qt.CursorShape.PointingHandCursor)
+        open_db.clicked.connect(self._open_database)
+        dl.addWidget(open_db, 0, Qt.AlignmentFlag.AlignBottom)
+        c.addWidget(db_row)
         lay.addWidget(card)
 
         card, c = _card()
@@ -961,7 +994,8 @@ class SettingsDialog(GlassDialog):
 
     def _load_subagents(self) -> list[dict]:
         builtins = {s.name: s for s in available_subagents(
-            BASE_DIR, workspace=self.agent_cfg.get("workspace"))}
+            BASE_DIR, workspace=self.agent_cfg.get("workspace"),
+            database=self.agent_cfg.get("database"))}
         self._builtin_names = set(builtins)
         items = self.agent_cfg["subagents"].get("items") or []
         if not items:
@@ -1193,6 +1227,7 @@ class SettingsDialog(GlassDialog):
         self._update_permission_hint()
         self.system.setPlainText(self.agent_cfg.get("system", ""))
         self.workspace.setText(str(self.agent_cfg.get("workspace") or ""))
+        self.database_path.setText(str(self.agent_cfg.get("database") or ""))
         self._detect_preset()
         self.secret_id.setText(self.asr_cfg.get("secret_id", ""))
         self.secret_key.setText(self.asr_cfg.get("secret_key", ""))
@@ -1259,6 +1294,7 @@ class SettingsDialog(GlassDialog):
             "permission_mode": self.permission.currentData(),
             "stream": self.stream.isChecked(),
             "workspace": self.workspace.text().strip(),
+            "database": self.database_path.text().strip(),
         })
         cfg["subagents"] = {
             "enabled": self.sub_enabled.isChecked(),

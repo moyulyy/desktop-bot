@@ -9,9 +9,15 @@
   "permission_mode": "default",
   "stream": true,
   "workspace": "temp",
+  "database": "database",
   "subagents": {
     "enabled": true,
     "max_depth": 2,
     "items": []
-  }
+  },
+  "embedding_model": "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2",
+  "embedding_cache": "models",
+  "rag_top_k": 8,
+  "rag_chunk_tokens": 700,
+  "rag_overlap": 100
 }

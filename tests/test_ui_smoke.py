@@ -206,6 +206,7 @@ def test_dialogs_are_always_on_top(qapp):
     assert dlg.windowFlags() & Qt.WindowType.WindowStaysOnTopHint
     assert dlg.windowFlags() & Qt.WindowType.Tool
     assert dlg.workspace.text()
+    assert dlg.database_path.text()
     dlg.close()
     dlg.deleteLater()
 
@@ -461,3 +462,20 @@ def test_agent_events_use_one_tool_group(qapp):
     ball._on_agent_reply("搜索完成")
     assert not groups[0]["running"]
     ball.close()
+
+
+def test_library_and_attachment_controls(qapp):
+    from desktop_assistant.app import FloatingBall
+
+    ball = FloatingBall()
+    ball.show()
+    ball.set_expanded(True)
+    QTest.qWait(450)
+    assert hasattr(ball, "btn_library")
+    assert hasattr(ball, "btn_attach")
+    assert ball.btn_library.geometry().right() <= ball.width()
+    ball._populate_menu()
+    texts = [action.text() for action in ball.menu.actions()]
+    assert "立即更新 RAG 与知识库" in texts
+    ball.close()
+    qapp.processEvents()

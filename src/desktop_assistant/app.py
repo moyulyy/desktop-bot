@@ -115,9 +115,11 @@ from PySide6.QtNetwork import QNetworkAccessManager, QNetworkReply, QNetworkRequ
 from PySide6.QtWidgets import (
     QApplication,
     QDialog,
+    QFileDialog,
     QGraphicsOpacityEffect,
     QLineEdit,
     QMenu,
+    QProgressDialog,
     QSystemTrayIcon,
     QWidget,
 )
@@ -133,6 +135,9 @@ from .agent_framework import (
     default_tools,
 )
 from .local_subagents import available_subagents
+from .library_service import ChatTempStore, LibraryOrganizer, LibraryWorker
+from .database_tools import build_database_tools
+from .rag import build_rag_tools
 from .config_store import (
     DEFAULT_SYSTEM,
     DEFAULT_PREFS,
@@ -1885,7 +1890,9 @@ def build_subagent_specs(cfg: dict, base_tools: list, cwd: str,
         return []
     by_name = {t.name: t for t in base_tools}
     builtins = {s.name: s for s in available_subagents(
-        cwd, workspace=cfg.get("workspace"), stop_event=stop_event)}
+        cwd, workspace=cfg.get("workspace"), database=cfg.get("database"),
+        stop_event=stop_event, embedding_model=cfg.get("embedding_model"),
+        embedding_cache=cfg.get("embedding_cache"))}
     items = sub.get("items") or []
     if not items:
         return list(builtins.values())
@@ -1965,6 +1972,16 @@ class Agent:
         self.cfg = load_agent_config()
         stop_event = threading.Event()
         tools = default_tools(self.cwd, stop_event=stop_event)
+        database = self.cfg.get("database") or os.path.join(self.cwd, "database")
+        tools += build_database_tools(
+            database, base_dir=self.cwd, read_only=True,
+            stop_event=stop_event,
+            reports_dir=os.path.join(self.cwd, "temp", "reports"))
+        tools += build_rag_tools(
+            database, base_dir=self.cwd, read_only=True,
+            stop_event=stop_event,
+            embedding_model=self.cfg.get("embedding_model"),
+            embedding_cache=self.cfg.get("embedding_cache"))
         specs = build_subagent_specs(self.cfg, tools, self.cwd, stop_event=stop_event)
         sub = self.cfg.get("subagents") or {}
         system_prompt = self.cfg.get("system") or DEFAULT_SYSTEM
@@ -1972,7 +1989,9 @@ class Agent:
             system_prompt += (
                 "\n\n当用户意图不明确或存在多个合理方向时，"
                 "调用 ask_user 工具给出 2-6 个简短选项让用户点击选择。"
-                "回复支持 Markdown，也可以用 ![说明](图片URL或本地路径) 展示图片。")
+                "回复支持 Markdown，也可以用 ![说明](图片URL或本地路径) 展示图片。"
+                "当结果很长、表格很宽或需要打印时，调用 open_report 在浏览器中展示。"
+                "论文/网页问题优先调用 rag_search，必须给出文件路径、URL 和页码来源。")
         self.core = AgentCore(AgentOptions(
             system_prompt=system_prompt,
             model=self.cfg.get("model", "gpt-4o-mini"),
@@ -2353,6 +2372,10 @@ class FloatingBall(QWidget):
         self._notify_hidden = self._prefs["notify_hidden"]
         self._voice_enabled = self._prefs["voice_enabled"]
         self._auto_show_chat = self._prefs["auto_show_chat"]
+        self._temp_store = ChatTempStore(os.path.join(PROJECT_ROOT, "temp"))
+        self._attachments: list[str] = []
+        self._library_worker = None
+        self._library_progress = None
 
         # —— 状态 ——
         self._expanded = False
@@ -2456,6 +2479,11 @@ class FloatingBall(QWidget):
         self._tick.timeout.connect(self._on_tick)
         self._tick.start()
 
+        self._daily_timer = QTimer(self)
+        self._daily_timer.setInterval(60_000)
+        self._daily_timer.timeout.connect(self._check_daily_library)
+        self._daily_timer.start()
+
     # ------------------------------------------------------------------ #
     # 构建
     # ------------------------------------------------------------------ #
@@ -2516,15 +2544,21 @@ class FloatingBall(QWidget):
         self.input.textChanged.connect(self._update_send_state)
         self.input.installEventFilter(self)
         self.btn_clear = IconButton("clear", 20, self.row)
-        self.btn_clear.clicked.connect(self.input.clear)
+        self.btn_clear.clicked.connect(self._clear_composer)
         self.btn_mic = IconButton("mic", 32, self.row)
         self.btn_mic.setToolTip("语音输入（腾讯云一句话识别）")
         self.btn_mic.clicked.connect(self._toggle_record)
+        self.btn_attach = IconButton("plus", 26, self.row)
+        self.btn_attach.setToolTip("添加附件 / 截图 / 粘贴图片")
+        self.btn_attach.clicked.connect(self._show_attach_menu)
         self.btn_send = IconButton("send", 34, self.row)
         self.btn_send.setToolTip("发送  (Enter)")
         self.btn_send.clicked.connect(self._on_send)
-        self._themed = [self.btn_clear, self.btn_mic, self.btn_send,
-                        self.chat, self.toast]
+        self.btn_library = IconButton("sparkles", 26, self)
+        self.btn_library.setToolTip("添加文件到知识库")
+        self.btn_library.clicked.connect(self._choose_library_files)
+        self._themed = [self.btn_clear, self.btn_mic, self.btn_attach, self.btn_send,
+                        self.btn_library, self.chat, self.toast]
 
     def _build_animations(self):
         self._exp_anim = QVariantAnimation(self)
@@ -2559,6 +2593,8 @@ class FloatingBall(QWidget):
         m.clear()
         m.addAction("收起悬浮球" if self._expanded else "展开对话", self.toggle_panel)
         m.addAction("隐藏消息气泡" if self._chat_visible else "显示消息气泡", self.toggle_chat)
+        m.addAction("在浏览器打开当前对话", self._open_chat_in_browser)
+        m.addAction("立即更新 RAG 与知识库", self._manual_library_update)
         m.addAction("清空会话", self._clear_chat)
         m.addSeparator()
         m.addAction(make_icon("gear", 16, th.label2), "设置…", self._open_settings)
@@ -2740,7 +2776,9 @@ class FloatingBall(QWidget):
             pw, ph = g.pill.width(), g.pill.height()
             sx = pl + pw - 5 - 34
             self.btn_send.move(round(sx), round(pt + (ph - 34) / 2))
-            mx = sx - 2 - 32
+            ax = sx - 2 - 26
+            self.btn_attach.move(round(ax), round(pt + (ph - 26) / 2))
+            mx = ax - 2 - 32
             self.btn_mic.move(round(mx), round(pt + (ph - 32) / 2))
             cx = mx - 2 - 20
             self.btn_clear.move(round(cx), round(pt + (ph - 20) / 2))
@@ -2751,6 +2789,9 @@ class FloatingBall(QWidget):
             corner = ("t" if g.up else "b") + ("l" if g.left else "r")
             self.chat.set_resize_corner(corner)
             self.chat.setGeometry(g.chat.toRect())
+        ball = g.ball
+        library_x = ball.right() + 2 if g.left else ball.left() - 28
+        self.btn_library.move(round(library_x), round(ball.bottom() - 28))
         self._sync_children()
 
     def _chat_pres(self) -> float:
@@ -3293,9 +3334,29 @@ class FloatingBall(QWidget):
                 self.btn_send.setToolTip("停止生成  (Esc)")
         else:
             self.btn_send.set_kind("send")
-            self.btn_send.setEnabled(bool(text.strip()))
+            self.btn_send.setEnabled(bool(text.strip()) or bool(self._attachments))
             self.btn_send.setToolTip("发送  (Enter)")
-        self.btn_clear.setVisible(bool(text) and not self._sending)
+        self.btn_clear.setVisible((bool(text) or bool(self._attachments))
+                                  and not self._sending)
+
+    def _open_chat_in_browser(self):
+        from .reports import chat_markdown, open_report
+        if not self.chat.messages:
+            self._toast("当前没有可导出的对话。", self._content_global(),
+                        kind="info", ttl=1800)
+            return
+        try:
+            path = open_report(
+                os.path.join(PROJECT_ROOT, "temp", "reports"),
+                "Desktop Bot 对话记录",
+                chat_markdown(self.chat.messages),
+                "从悬浮球导出的当前会话")
+        except OSError as exc:
+            self._toast(f"无法打开浏览器：{exc}", self._content_global(),
+                        kind="error", ttl=2600)
+            return
+        self._toast(f"已在浏览器打开：{os.path.basename(path)}",
+                    self._content_global(), kind="info", ttl=2200)
 
     def _clear_chat(self):
         if self._sending:
@@ -3348,15 +3409,26 @@ class FloatingBall(QWidget):
                         kind="info", ttl=2200)
             return
         text = self.input.text().strip()
-        if not text:
+        attachments = list(self._attachments)
+        if not text and not attachments:
             return
         self.chat.finish_tool_group()
+        display = text or "（已附加文件）"
+        if attachments:
+            display += "\n\n" + "\n".join(
+                f"📎 {os.path.basename(path)}" for path in attachments)
+            text_for_agent = (text + "\n\n[用户附件]\n" + "\n".join(attachments)).strip()
+        else:
+            text_for_agent = text
+        self._temp_store.log_message("user", text, attachments)
+        self._attachments = []
+        self._update_attach_hint()
         self.input.clear()
         if not self._expanded:
             self.set_expanded(True)
         if not self._chat_visible and self._auto_show_chat:
             self.set_chat_visible(True)
-        self.chat.add("user", text)
+        self.chat.add("user", display)
         self.chat.set_typing(True)
         self.agent.clear_stop()
         self.chat.set_status("正在思考…", self._idle_detail())
@@ -3367,7 +3439,160 @@ class FloatingBall(QWidget):
         self._clear_after_reply = False
         self._stop_requested = False
         self._update_send_state()
-        threading.Thread(target=self._agent_worker, args=(text,), daemon=True).start()
+        threading.Thread(target=self._agent_worker, args=(text_for_agent,), daemon=True).start()
+
+    # ------------------------------------------------------------------ #
+    # 知识库 / 附件
+    # ------------------------------------------------------------------ #
+    def _update_attach_hint(self):
+        if not hasattr(self, "input"):
+            return
+        count = len(self._attachments)
+        self.input.setPlaceholderText(
+            f"已附加 {count} 个文件，可继续输入…" if count else "输入消息…")
+        self._update_send_state()
+
+    def _clear_composer(self):
+        for path in self._attachments:
+            try:
+                if os.path.abspath(path).startswith(
+                        os.path.abspath(self._temp_store.root) + os.sep):
+                    os.remove(path)
+            except OSError:
+                pass
+        self._attachments = []
+        self.input.clear()
+        self._update_attach_hint()
+
+    def _show_attach_menu(self):
+        menu = QMenu(self)
+        menu.addAction("添加文件 / 图片…", self._choose_attachments)
+        menu.addAction("截取屏幕", self._capture_attachment)
+        menu.addAction("粘贴剪贴板", lambda: self._paste_attachment())
+        menu.exec(self.input.mapToGlobal(QPoint(0, self.input.height())))
+
+    def _choose_attachments(self):
+        paths, _ = QFileDialog.getOpenFileNames(
+            self, "添加附件", PROJECT_ROOT, "所有文件 (*.*)")
+        self._add_attachment_paths(paths)
+
+    def _add_attachment_paths(self, paths):
+        added = 0
+        for path in paths:
+            try:
+                self._attachments.append(self._temp_store.save_attachment(path))
+                added += 1
+            except OSError as exc:
+                self._toast(f"附件读取失败：{exc}", self._content_global(),
+                            kind="error", ttl=2400)
+        if added:
+            self._update_attach_hint()
+            self._toast(f"已附加 {added} 个文件", self._content_global(),
+                        kind="info", ttl=1600)
+
+    def _capture_attachment(self):
+        screen = QGuiApplication.primaryScreen()
+        if screen is None:
+            return
+        pixmap = screen.grabWindow(0)
+        try:
+            path = self._temp_store.save_image(pixmap.toImage())
+            self._attachments.append(path)
+            self._update_attach_hint()
+            self._toast("截图已附加", self._content_global(), kind="info", ttl=1600)
+        except OSError as exc:
+            self._toast(f"截图失败：{exc}", self._content_global(), kind="error", ttl=2400)
+
+    def _paste_attachment(self) -> bool:
+        mime = QGuiApplication.clipboard().mimeData()
+        if mime is None:
+            return False
+        if mime.hasImage():
+            image = QGuiApplication.clipboard().image()
+            if not image.isNull():
+                try:
+                    self._attachments.append(self._temp_store.save_image(image))
+                    self._update_attach_hint()
+                    return True
+                except OSError:
+                    return False
+        if mime.hasUrls():
+            paths = [url.toLocalFile() for url in mime.urls() if url.isLocalFile()]
+            if paths:
+                self._add_attachment_paths(paths)
+                return True
+        return False
+
+    def _choose_library_files(self):
+        paths, _ = QFileDialog.getOpenFileNames(
+            self, "添加文件到知识库", PROJECT_ROOT, "所有文件 (*.*)")
+        if paths:
+            self._start_library_update(paths=paths, include_temp=False)
+
+    def _manual_library_update(self):
+        self._start_library_update(include_temp=True)
+
+    def _check_daily_library(self):
+        now = time.localtime()
+        today = time.strftime("%Y-%m-%d", now)
+        if now.tm_hour == 2 and now.tm_min < 5:
+            if self.settings.value("last_daily_library", "") != today:
+                self.settings.setValue("last_daily_library", today)
+                if self._library_worker is None:
+                    self._start_library_update(include_temp=True, silent=True)
+
+    def _start_library_update(self, paths=None, include_temp=False, silent=False):
+        if self._library_worker is not None:
+            self._toast("知识库正在整理，请稍候。", self._content_global(),
+                        kind="info", ttl=1800)
+            return
+        cfg = self.agent.cfg
+        database = cfg.get("database") or os.path.join(PROJECT_ROOT, "database")
+        organizer = LibraryOrganizer(
+            database, os.path.join(PROJECT_ROOT, "temp"),
+            embedding_model=cfg.get("embedding_model"),
+            embedding_cache=cfg.get("embedding_cache"))
+        worker = LibraryWorker(organizer, paths=paths, include_temp=include_temp)
+        self._library_worker = worker
+        if not silent:
+            progress = QProgressDialog("正在整理知识库…", None, 0, 100, self)
+            progress.setWindowTitle("知识库更新")
+            progress.setWindowModality(Qt.WindowModality.ApplicationModal)
+            progress.setCancelButton(None)
+            progress.setAutoClose(False)
+            progress.setMinimumDuration(0)
+            progress.setWindowFlags(Qt.WindowType.Tool
+                                    | Qt.WindowType.WindowStaysOnTopHint)
+            progress.show()
+            self._library_progress = progress
+            worker.progress.connect(
+                lambda value, message: (progress.setValue(value),
+                                        progress.setLabelText(message)))
+        worker.finished.connect(self._on_library_done)
+        worker.failed.connect(self._on_library_failed)
+        worker.start()
+
+    def _on_library_done(self, result):
+        if self._library_progress is not None:
+            self._library_progress.setValue(100)
+            self._library_progress.close()
+            self._library_progress = None
+        worker, self._library_worker = self._library_worker, None
+        if worker is not None:
+            worker.deleteLater()
+        self._toast("知识库已更新，可以直接检索新资料。", self._content_global(),
+                    kind="info", ttl=2600)
+        self._update_attach_hint()
+
+    def _on_library_failed(self, message):
+        if self._library_progress is not None:
+            self._library_progress.close()
+            self._library_progress = None
+        worker, self._library_worker = self._library_worker, None
+        if worker is not None:
+            worker.deleteLater()
+        self._toast(f"知识库更新失败：{message}", self._content_global(),
+                    kind="error", ttl=5000)
 
     def _stop_generation(self):
         if not self._sending:
@@ -3582,6 +3807,8 @@ class FloatingBall(QWidget):
             role = "error" if self._had_error else "agent"
             self.chat.add(role, reply)
         self.chat.finish_tool_group()
+        if reply:
+            self._temp_store.log_message("assistant", reply, [])
         self._had_error = False
         self._refresh_status()
         self._update_send_state()
@@ -3709,6 +3936,10 @@ class FloatingBall(QWidget):
             if t == QEvent.Type.KeyPress and event.key() == Qt.Key.Key_Escape:
                 self._escape()
                 return True
+            if (t == QEvent.Type.KeyPress and event.key() == Qt.Key.Key_V
+                    and event.modifiers() & Qt.KeyboardModifier.ControlModifier):
+                if self._paste_attachment():
+                    return True
         return super().eventFilter(obj, event)
 
     def keyPressEvent(self, e):
@@ -3742,7 +3973,9 @@ def _install_error_log():
     """pythonw 启动时没有 stderr；把未捕获异常写到同目录，方便排查。"""
     import traceback
 
-    path = os.path.join(PROJECT_ROOT, "app_error.log")
+    temp_dir = os.path.join(PROJECT_ROOT, "temp")
+    os.makedirs(temp_dir, exist_ok=True)
+    path = os.path.join(temp_dir, "app_error.log")
 
     def hook(exc_type, exc, tb):
         try:
