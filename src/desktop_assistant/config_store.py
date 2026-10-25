@@ -32,6 +32,8 @@ DEFAULT_SYSTEM = (
     "需要时使用 Markdown 组织答案，也可以用 ![说明](图片URL或本地路径) 展示图片。"
     "遇到需要检索资料、修改代码或整理长文的任务，可以把子任务委派给 task 工具里的子智能体，"
     "再把结论整合给用户。需要用户在多个方向中做决定时，调用 ask_user 给出 2-6 个简短选项。"
+    "临时脚本、调试输出和中间结果统一写入项目下的 temp/（脚本放 temp/scripts，"
+    "输出放 temp/notes），不要写到项目根目录。"
 )
 
 DEFAULT_AGENT_CONFIG: dict[str, Any] = {

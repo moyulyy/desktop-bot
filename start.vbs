@@ -27,6 +27,23 @@ Function ExitCode(command)
     On Error GoTo 0
 End Function
 
+Function CaptureOutput(command)
+    Dim e, text
+    CaptureOutput = ""
+    On Error Resume Next
+    Set e = sh.Exec(command)
+    If Err.Number <> 0 Then
+        Err.Clear
+        Exit Function
+    End If
+    Do While e.Status = 0
+        WScript.Sleep 80
+    Loop
+    text = e.StdOut.ReadAll
+    On Error GoTo 0
+    CaptureOutput = Trim(text)
+End Function
+
 Function ProcessRunning(processName)
     Dim e, text
     ProcessRunning = False
@@ -46,16 +63,21 @@ Function ProcessRunning(processName)
     On Error GoTo 0
 End Function
 
-' The environment created during setup. Keep this list portable across common
-' Miniconda/Anaconda install locations.
+' The environment created during setup. Probe conda dynamically first
+' (CONDA_EXE / `conda info --base`), then fall back to the usual install
+' locations so the launcher keeps working after moving the project.
 envPython = ""
-Dim candidates
+Dim candidates, condaBase
 candidates = Array( _
-    "C:\ProgramData\miniconda3\envs\desktop-rag\pythonw.exe", _
+    sh.ExpandEnvironmentStrings("%USERPROFILE%") & "\.conda\envs\desktop-rag\pythonw.exe", _
     sh.ExpandEnvironmentStrings("%USERPROFILE%") & "\miniconda3\envs\desktop-rag\pythonw.exe", _
     sh.ExpandEnvironmentStrings("%USERPROFILE%") & "\anaconda3\envs\desktop-rag\pythonw.exe", _
     sh.ExpandEnvironmentStrings("%LOCALAPPDATA%") & "\miniconda3\envs\desktop-rag\pythonw.exe", _
-    sh.ExpandEnvironmentStrings("%LOCALAPPDATA%") & "\Continuum\anaconda3\envs\desktop-rag\pythonw.exe" _
+    sh.ExpandEnvironmentStrings("%LOCALAPPDATA%") & "\Continuum\anaconda3\envs\desktop-rag\pythonw.exe", _
+    "C:\ProgramData\miniconda3\envs\desktop-rag\pythonw.exe", _
+    "C:\ProgramData\anaconda3\envs\desktop-rag\pythonw.exe", _
+    "D:\miniconda3\envs\desktop-rag\pythonw.exe", _
+    "D:\anaconda3\envs\desktop-rag\pythonw.exe" _
 )
 For Each candidate In candidates
     If envPython = "" And fso.FileExists(candidate) Then
@@ -63,19 +85,36 @@ For Each candidate In candidates
     End If
 Next
 
+' Last resort: ask conda itself where its base lives, then look for the env.
+If envPython = "" Then
+    condaBase = CaptureOutput("cmd /c conda info --base 2>nul")
+    If condaBase <> "" Then
+        candidate = condaBase & "\envs\desktop-rag\pythonw.exe"
+        If fso.FileExists(candidate) Then
+            envPython = candidate
+        End If
+    End If
+End If
+
+' Keep the app self-contained: ignore packages installed in the user's
+' global Python site-packages, which would otherwise shadow the env.
+sh.Environment("PROCESS")("PYTHONNOUSERSITE") = "1"
+
 checkMode = (WScript.Arguments.Count > 0)
 
 If envPython <> "" Then
-    checkCmd = "cmd /c " & q & envPython & q & " -c " & q & "import PySide6, requests" & q
+    ' Call the interpreter directly; nesting quotes inside `cmd /c "exe" ...`
+    ' makes cmd.exe truncate the path on some systems.
+    checkCmd = q & envPython & q & " -c " & q & "import PySide6, requests" & q
     If ExitCode(checkCmd) = 0 Then
         launch = q & envPython & q & " -m desktop_assistant"
     End If
 End If
 
 If launch = "" Then
-    If ExitCode("cmd /c py -3 -c " & q & "import PySide6, requests" & q) = 0 Then
+    If ExitCode("py -3 -c " & q & "import PySide6, requests" & q) = 0 Then
         launch = "pyw -3 -m desktop_assistant"
-    ElseIf ExitCode("cmd /c python -c " & q & "import PySide6, requests" & q) = 0 Then
+    ElseIf ExitCode("python -c " & q & "import PySide6, requests" & q) = 0 Then
         launch = "pythonw -m desktop_assistant"
     End If
 End If

@@ -74,7 +74,14 @@ Desktop Bot 是一个常驻桌面的 AI 悬浮球。它不像传统聊天窗口�
 
 ### 方式一：一键启动（推荐）
 
-1. 安装 [Python 3.10+](https://www.python.org/downloads/windows/)；
+> **本机部署状态**：项目已位于 `D:\software\sc\vv\vv`，conda 环境
+> `desktop-rag`（Python 3.11）已创建并装好依赖，直接双击 **`start.vbs`** 即可运行。
+> `config/agent_config.json` 的 `workspace` / `database` / `embedding_cache` 已改为
+> 相对路径；知识库与 RAG 索引中的旧机器路径也已迁移到当前项目根。
+
+首次在其他机器部署时：
+
+1. 安装 [Python 3.10+](https://www.python.org/downloads/windows/) 或 Miniconda；
 2. 克隆仓库：
 
    ```bash
@@ -95,7 +102,13 @@ Desktop Bot 是一个常驻桌面的 AI 悬浮球。它不像传统聊天窗口�
 ### 方式二：命令行
 
 ```bash
+# 推荐先创建 conda 环境（本项目使用 desktop-rag，Python 3.11）
+conda create -y -n desktop-rag --override-channels \
+  -c https://conda.anaconda.org/conda-forge python=3.11
+conda activate desktop-rag
+
 python -m pip install -r requirements.txt
+python -m pip install -r requirements-rag.txt   # 可选：RAG / PDF / HTML / OCR
 python -m pip install -e .
 
 # 直接运行
@@ -104,6 +117,10 @@ python -m desktop_assistant
 # 或使用安装后的入口
 desktop-assistant
 ```
+
+> 若本机 `%USERPROFILE%\.condarc` 配置的 Anaconda 镜像返回 403，可像上面这样用
+> `--override-channels -c https://conda.anaconda.org/conda-forge` 临时绕过，不必修改
+> 全局 conda 配置。`scripts/` 下的 PDF 分析脚本还需要 `python -m pip install pymupdf`。
 
 不安装为包时也可以：
 
@@ -223,14 +240,19 @@ PYTHONPATH=src python -m desktop_assistant
 - 切换窗口、打开应用/文件/URL；
 - 在临时工作空间里写并运行 Python 脚本。
 
-截图和临时脚本默认保存在项目下的 `temp/`，**不会写到项目根目录**：
+截图和临时脚本统一保存在项目下的 `temp/`，**不会写到项目根目录**：
 
 ```text
 temp/
+  scripts/       临时 Python 脚本（一次性分析、调试）
+  notes/         临时笔记、调试输出与扫描结果
   screenshots/   截图
-  scripts/       临时 Python 脚本
-  notes/         临时笔记
 ```
+
+> **约定**：根目录只保留源码、配置、启动脚本和数据目录。需要写一次性脚本或中间结果时，
+> 放到 `temp/scripts/` 或 `temp/notes/`；`temp/` 已加入 `.gitignore`，不会污染仓库。
+> 迁移前散落在根目录的扫描脚本（如 `scan_ctx.py`、`scan_cer.py`）和输出文件已按此规则
+> 移入 `temp/`。
 
 路径可在「设置 → 子智能体 → 工作空间」修改，保存在 `config/agent_config.json`
 的 `workspace` 字段。`temp/` 已加入 `.gitignore`。
@@ -293,15 +315,26 @@ database/
 #### 安装与模型
 
 ```bash
-conda create -n desktop-rag python=3.11
+conda create -y -n desktop-rag --override-channels \
+  -c https://conda.anaconda.org/conda-forge python=3.11
 conda activate desktop-rag
 python -m pip install -r requirements.txt -r requirements-rag.txt
+python -m pip install -e .
 ```
+
+> 本机的 conda 默认频道是清华镜像，当前该镜像对 `pkgs/main` 返回 403；上面的
+> `--override-channels` 写法直接使用 conda-forge，不需要改 `.condarc`。本机环境
+> 位于 `C:\Users\lyy\.conda\envs\desktop-rag`，`start.vbs` / `run.bat` 会自动找到它
+> （包括 `%USERPROFILE%\.conda\envs` 和 `conda info --base` 两种探测方式）。
 
 首次 embedding 会下载多语言模型
 `sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2`（384 维，约 240 MB）
-到 `models/`（已加入 `.gitignore`）。PDF/OCR 依赖是可选的；没有安装 `fastembed` 时
+到 `models/`（已加入 `.gitignore`）。本项目从旧机器复制时已带上 `models/` 缓存
+（约 722 MB），无需联网下载。PDF/OCR 依赖是可选的；没有安装 `fastembed` 时
 会回退到确定性的 `HashEmbedder`，便于离线测试，但不适合生产语义检索。
+
+启动脚本会设置 `PYTHONNOUSERSITE=1`，避免 `%APPDATA%\Python\Python311\site-packages`
+里的全局包遮蔽 conda 环境中的依赖；手动排查时也建议先设置该变量。
 
 #### 添加论文/文本
 
@@ -312,12 +345,10 @@ python -m pip install -r requirements.txt -r requirements-rag.txt
 PYTHONPATH=src python -m desktop_assistant.rag_cli ingest-pdf "D:\papers\paper.pdf"
 
 # 单篇 txt / md
-PYTHONPATH=src python -m desktop_assistant.rag_cli ingest-text "D:
-otes
-ote.md"
+PYTHONPATH=src python -m desktop_assistant.rag_cli ingest-text "D:\notes\note.md"
 
 # 批量导入整个目录（PDF、HTML、txt、md）
-PYTHONPATH=src python -m desktop_assistant.rag_cli ingest-dir database/papers
+PYTHONPATH=src python -m desktop_assistant.rag_cli ingest-dir database/pdfs
 
 # URL 列表（JSONL：{"url": "...", "title": "..."}）；只在导入时抓取
 PYTHONPATH=src python -m desktop_assistant.rag_cli ingest-urls database/urls/urls.jsonl
@@ -327,7 +358,7 @@ PYTHONPATH=src python -m desktop_assistant.rag_cli search "火星任务预算" -
 PYTHONPATH=src python -m desktop_assistant.rag_cli stats
 ```
 
-也可以直接把 PDF 放进 `database/papers/`，然后在对话里让 `rag` 子智能体执行
+也可以直接把 PDF 放进 `database/pdfs/`，然后在对话里让 `rag` 子智能体执行
 `rag_ingest_pdf` 或 `rag_reindex`。重复导入会按源文件 SHA 跳过，10k 篇可以分批跑。
 
 ### 知识库入口、附件与定时整理
@@ -506,8 +537,10 @@ src/desktop_assistant/
 config/               agent_config.example.json、asr_config.example.json
 vendor/everything/    Everything 1.5 便携版与 SDK3 DLL
 database/             本地知识库；仓库只保留目录和 README，真实内容已忽略
+models/               fastembed 模型缓存（已忽略，迁移时随目录复制）
+scripts/              PDF 定位/台阶图渲染辅助脚本（需要 pymupdf）
 tests/                框架 + 配置 + 离屏 UI 冒烟测试
-temp/                 截图 / 临时脚本 / 临时笔记（已忽略）
+temp/                 截图 / 临时脚本 / 中间结果（已忽略）
 start.vbs             无控制台静默启动器
 run.bat               首次安装依赖并静默启动
 pyproject.toml        src 布局、入口点与依赖声明
@@ -535,8 +568,15 @@ requirements-rag.txt  可选 PDF / HTML / embedding / 向量索引 / OCR 依赖
 ## 🧪 开发与测试
 
 ```bash
-python -m pip install pytest
+conda activate desktop-rag
+python -m pip install pytest          # 首次
 python -m pytest tests
+```
+
+在 Git Bash / 未激活 conda 的终端里，可直接指定解释器并隔离全局包：
+
+```bash
+PYTHONNOUSERSITE=1 "C:/Users/lyy/.conda/envs/desktop-rag/python.exe" -m pytest tests -q
 ```
 
 测试使用离屏 Qt（`QT_QPA_PLATFORM=offscreen`），不会访问网络或写入真实配置；
@@ -573,6 +613,23 @@ python -m desktop_assistant
 **Q：需要安装 Everything 吗？**
 项目自带 Everything 1.5 便携版与 SDK3 DLL，`finder` 首次检索会自动启动；若需内容搜索，
 请在 Everything 中开启内容索引。
+
+**Q：把项目复制到新机器 / 新路径后需要改什么？**
+一般只需保证 Python 环境可用。`workspace`、`database`、`embedding_cache` 都支持相对
+项目根的写法（`temp`、`database`、`models`），`config/agent_config.json` 已按这种方式
+配置；如果之前在设置页填过绝对路径，改回相对值即可。
+
+知识库索引的 `documents.path` 本身是相对路径，换机器后仍能定位文件；只有
+`documents.source`、`catalog.json`、`INDEX.md` 会带旧根路径。本次迁移已把
+`database/index.sqlite3` 中的 `C:\Users\Administrator\Desktop\vv` 替换为当前项目根，
+并重新导出了 `catalog.json` / `INDEX.md`。若以后再次搬迁，可以：
+
+1. 用旧根 → 新根做一次字符串替换（`documents.source` 等字段）；或
+2. 删除 `database/catalog.json` / `INDEX.md` 后调用 `database_reindex` 重新导出一遍
+   （标题、描述、标签会保留）。
+
+`models/` 是 embedding 模型缓存，复制项目时一并带上即可离线运行；它和 `database/`
+的真实内容都不进入 Git。
 
 ## 📄 License
 

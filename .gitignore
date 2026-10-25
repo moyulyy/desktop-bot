@@ -14,14 +14,12 @@ temp/
 *.log
 models/
 
-# 本地运行的 OCR 二进制与临时分析文件
+# 本地运行的 OCR 二进制
 Umi-OCR_Paddle_v2.0.0/
-cer_ctx.txt
-cer_hits.txt
-scan_cer.py
-scan_ctx.py
-render_stl.py
 tools/
+
+# 临时脚本、调试输出和扫描结果统一放在 temp/（已整体忽略）。
+# 项目根目录只保留源码、配置和启动脚本，不要在这里新建临时文件。
 
 # 知识库只保留目录结构，不提交真实内容
 database/**

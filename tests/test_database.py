@@ -143,10 +143,10 @@ def test_report_pdf_collapsible_and_link(tmp_path):
 
 
 def test_report_repairs_double_encoded_file_uri():
-    bad = ("file:///e:/C%3A/Users/Administrator/Desktop/vv/database/pdfs/"
+    bad = ("file:///e:/C%3A/Users/test/Desktop/vv/database/pdfs/"
            "paper.pdf")
     page = build_report_html("链接测试", f"[打开原文]({bad})")
-    assert "file:///C:/Users/Administrator/Desktop/vv/database/pdfs/paper.pdf" in page
+    assert "file:///C:/Users/test/Desktop/vv/database/pdfs/paper.pdf" in page
     assert "e:/C%3A" not in page
     assert ">打开原文</a>" in page
 

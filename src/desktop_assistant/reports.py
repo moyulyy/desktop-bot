@@ -498,12 +498,13 @@ def build_literature_html(title: str, items: list[dict], subtitle: str = "") -> 
                 f'onclick="openLightbox(this.src,this.alt)">'
                 f'<figcaption>{caption}　<span class="img-path">图片绝对路径：'
                 f'<code>{html.escape(absolute)}</code></span></figcaption></figure>')
+        page_html = f"<span class='page'>{page}</span>" if page else ""
+        meta_html = f"<p class='meta'>{meta}</p>" if meta else ""
+        links_html = f"<p class='links'>{chr(32).join(links)}</p>" if links else ""
+        summary_html = f"<p>{summary}</p>" if summary else ""
         cards.append(
-            f'<article class="lit-card"><h2>{item_title}'
-            f'{f"<span class=\'page\'>{page}</span>" if page else ""}</h2>'
-            f'{f"<p class=\'meta\'>{meta}</p>" if meta else ""}'
-            f'{f"<p class=\'links\'>{chr(32).join(links)}</p>" if links else ""}'
-            f'{f"<p>{summary}</p>" if summary else ""}'
+            f'<article class="lit-card"><h2>{item_title}{page_html}</h2>'
+            f'{meta_html}{links_html}{summary_html}'
             f'{"".join(images)}</article>')
     stamp = datetime.now().strftime("%Y-%m-%d %H:%M")
     body = "".join(cards) or "<p>没有可展示的文献。</p>"
