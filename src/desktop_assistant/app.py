@@ -119,7 +119,6 @@ from PySide6.QtWidgets import (
     QGraphicsOpacityEffect,
     QLineEdit,
     QMenu,
-    QProgressDialog,
     QSystemTrayIcon,
     QWidget,
 )
@@ -136,6 +135,7 @@ from .agent_framework import (
 )
 from .local_subagents import available_subagents
 from .library_service import ChatTempStore, LibraryOrganizer, LibraryWorker
+from .library_progress import LibraryProgressDialog
 from .database_tools import build_database_tools
 from .rag import build_rag_tools
 from .reports import chat_markdown, open_pending_report, open_report
@@ -3560,27 +3560,20 @@ class FloatingBall(QWidget):
         worker = LibraryWorker(organizer, paths=paths, include_temp=include_temp)
         self._library_worker = worker
         if not silent:
-            progress = QProgressDialog("正在整理知识库…", None, 0, 100, self)
-            progress.setWindowTitle("知识库更新")
+            progress = LibraryProgressDialog(self, self.theme)
             progress.setWindowModality(Qt.WindowModality.ApplicationModal)
-            progress.setCancelButton(None)
-            progress.setAutoClose(False)
-            progress.setMinimumDuration(0)
-            progress.setWindowFlags(Qt.WindowType.Tool
-                                    | Qt.WindowType.WindowStaysOnTopHint)
             progress.show()
             self._library_progress = progress
-            worker.progress.connect(
-                lambda value, message: (progress.setValue(value),
-                                        progress.setLabelText(message)))
+            worker.progress.connect(progress.set_progress)
         worker.finished.connect(self._on_library_done)
         worker.failed.connect(self._on_library_failed)
         worker.start()
 
     def _on_library_done(self, result):
         if self._library_progress is not None:
-            self._library_progress.setValue(100)
-            self._library_progress.close()
+            progress = self._library_progress
+            progress.set_progress(100, "知识库已更新")
+            QTimer.singleShot(420, progress.close)
             self._library_progress = None
         worker, self._library_worker = self._library_worker, None
         if worker is not None:
