@@ -322,9 +322,15 @@ database/
 - 审核：`review_literature_items` 会移除不存在的图片、缺少 Fig/Figure 图注的图片和
   疑似整页截图；未通过项会在报告顶部显示「审核提示」；
 - 已有 PDF 需要补全图片时使用 `rag_reindex` 的 `force=true` 重新解析；
-- 图片：PDF 内嵌图保存到 `database/images/papers/<doc-id>/`，提取图注、可选 OCR；
+- 图片：PDF 内嵌图保存到 `temp/rag_images/<doc-id>/`（临时目录，默认保留 30 天，
+  每日整理时清理旧图），提取图注、可选 OCR；
   `image_describe` 可查看图注/OCR，后续可接本地或远程多模态模型生成描述；
-- 规模：`sqlite-vec` 可用时使用向量索引；未安装时退化为 SQLite 向量扫描（适合开发和小库）。
+- 规模：`sqlite-vec` 可用时使用向量索引；未安装时退化为 SQLite 向量扫描（适合开发和小库）；
+- 增量索引：按 `mtime` + `size`（必要时 SHA）跳过未变文件，只解析新增/变更内容，
+  已有 `rag_chunks` 与 embedding 向量保持不动；源文件删除时会清理对应分块；
+- GPU：`FastEmbedder` 自动检测 `CUDAExecutionProvider` / `DmlExecutionProvider`，
+  优先使用 GPU，初始化失败时回退 CPU。本机当前使用 `onnxruntime-directml`
+  （`DmlExecutionProvider`），不需要 CUDA/cuDNN。
 
 #### 安装与模型
 
@@ -334,6 +340,11 @@ conda create -y -n desktop-rag --override-channels \
 conda activate desktop-rag
 python -m pip install -r requirements.txt -r requirements-rag.txt
 python -m pip install -e .
+
+# 可选：GPU 加速 embedding（Windows 推荐 DirectML，无需 CUDA）
+python -m pip install onnxruntime-directml
+# 或使用 CUDA 版（需要匹配的 CUDA/cuDNN）
+# python -m pip install onnxruntime-gpu
 ```
 
 > 本机的 conda 默认频道是清华镜像，当前该镜像对 `pkgs/main` 返回 403；上面的
@@ -386,6 +397,10 @@ PYTHONPATH=src python -m desktop_assistant.rag_cli stats
 - 默认每天凌晨 **02:00**（应用运行时）自动整理一次；自动任务读取 `temp/` 和
   `database/`，写入仅限 `database/` 及其子路径。同一日期只运行一次；错过 02:00 时
   在 02:00–02:05 补跑。
+- 整理是增量的：重复执行只处理新增/变更文件，已有 RAG 向量直接复用；无变更时通常
+  1–2 秒完成，进度会随文件推进，不会长时间停在 18%。
+- RAG 提取的 PDF 内嵌图写入 `temp/rag_images/`，每次整理清理超过 30 天的图片；
+  `database/images/` 只保留用户自己的图片、截图和分析产物，不再保存 PDF 截图。
 - 手动「立即更新 RAG 与知识库」会立即处理 `temp/` 附件、迁移到 database，并在成功后
   清空对应的 `temp/chat` 临时数据。
 - 知识库写入和整理路径都经过根目录校验，不会写到 database 之外。
@@ -434,7 +449,7 @@ Umi-OCR 不随仓库提交（体积大，按 Umi-OCR 自身许可证分发）。
 `ocr.py` 会依次尝试 Umi-OCR 的 `/api/ocr` 常见 base64 请求格式，并兼容
 `data/text/ocr/result` 等响应结构；Umi-OCR 不可用时回退到本机 Tesseract
 （`chi_sim+eng`），仍失败则保留图片和图注而不阻断入库。Tesseract 需要额外安装
-程序及中文语言包。图片资产保存在 `database/images/papers/<doc-id>/`，
+程序及中文语言包。解析产生的 PDF 内嵌图保存在 `temp/rag_images/<doc-id>/`，
 `image_describe` 可查看图注/OCR/描述。
 
 ### 浏览器报表

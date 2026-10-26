@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "desktop-assistant"
-version = "2.0.0"
+version = "2.1.0"
 description = "iOS 风格桌面 AI 悬浮球助手，支持子智能体与 Everything 本地检索"
 readme = "README.md"
 requires-python = ">=3.10"

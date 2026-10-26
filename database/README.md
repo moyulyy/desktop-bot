@@ -7,7 +7,7 @@ database/
   pdfs/          PDF 文档
   html/          HTML 文件
   urls/          URL 记录（urls.jsonl）
-  images/        图片
+  images/        用户图片、截图与分析产物（PDF 提取图在 temp/rag_images，定期清理）
   screenshots/   截图
   passwords/     DPAPI 加密密码库
   markdown/      Markdown 笔记

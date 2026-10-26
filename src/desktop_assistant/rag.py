@@ -15,6 +15,7 @@ import os
 import re
 import sqlite3
 import struct
+import time
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -61,17 +62,38 @@ class HashEmbedder:
         return out
 
 
+def _gpu_providers() -> list[str]:
+    """返回本机可用的 ONNX Runtime GPU provider（CUDA 或 DirectML）。"""
+    try:
+        import onnxruntime
+        available = set(onnxruntime.get_available_providers())
+    except Exception:                                          # noqa: BLE001
+        return []
+    for provider in ("CUDAExecutionProvider", "DmlExecutionProvider"):
+        if provider in available:
+            return [provider, "CPUExecutionProvider"]
+    return []
+
+
 class FastEmbedder:
     """fastembed 的本地 ONNX embedding。"""
 
     def __init__(self, model_name: str = DEFAULT_MODEL,
-                 cache_dir: Optional[str] = None):
+                 cache_dir: Optional[str] = None,
+                 use_gpu: Optional[bool] = None):
         from fastembed import TextEmbedding
         kwargs = {"model_name": model_name}
         if cache_dir:
             os.makedirs(cache_dir, exist_ok=True)
             kwargs["cache_dir"] = cache_dir
+        if use_gpu is False:
+            kwargs["providers"] = ["CPUExecutionProvider"]
+        else:
+            providers = _gpu_providers()
+            if providers:
+                kwargs["providers"] = providers
         self.model = TextEmbedding(**kwargs)
+        self.providers = kwargs.get("providers") or ["CPUExecutionProvider"]
         sample = list(self.model.embed(["dimension probe"]))
         self.dim = len(sample[0]) if sample else 384
 
@@ -84,8 +106,12 @@ def create_embedder(model_name: str = DEFAULT_MODEL,
     try:
         return FastEmbedder(model_name, cache_dir)
     except Exception as exc:                                      # noqa: BLE001
-        print(f"[rag] fastembed 不可用，使用 HashEmbedder: {exc}")
-        return HashEmbedder()
+        print(f"[rag] GPU embedding 不可用，尝试 CPU: {exc}")
+        try:
+            return FastEmbedder(model_name, cache_dir, use_gpu=False)
+        except Exception as exc2:                                 # noqa: BLE001
+            print(f"[rag] fastembed 不可用，使用 HashEmbedder: {exc2}")
+            return HashEmbedder()
 
 
 @dataclass
@@ -392,6 +418,7 @@ class RagStore:
                 pass
         conn.execute("DELETE FROM rag_embeddings WHERE chunk_id IN "
                      "(SELECT id FROM rag_chunks WHERE document_id=?)", (document_id,))
+        conn.execute("DELETE FROM rag_images WHERE document_id=?", (document_id,))
         conn.execute("DELETE FROM rag_chunks WHERE document_id=?", (document_id,))
 
     def add_chunks(self, document_id: int, chunks: list[Chunk],
@@ -524,17 +551,50 @@ class RagStore:
                 and not str(records[chunk_id].get("path") or "").startswith(
                     ("markdown/INDEX", "markdown/chat-", "markdown/README"))]
 
+    def _rel(self, path: str) -> str:
+        if not path or "://" in path:
+            return ""
+        if os.path.isabs(path):
+            return os.path.relpath(path, self.kb.root).replace(os.sep, "/")
+        return path.replace(os.sep, "/")
+
+    def document_meta(self, source: str) -> Optional[dict]:
+        """按 source 或相对路径返回文档元数据（不计算 sha），用于增量跳过。"""
+        with self._connect() as conn:
+            row = conn.execute("""
+                SELECT d.id, d.path, d.title, d.mtime, d.size, d.sha256,
+                       (SELECT COUNT(*) FROM rag_chunks c
+                        WHERE c.document_id=d.id) AS chunks
+                FROM documents d WHERE d.source=? OR d.path=?
+                ORDER BY d.id DESC LIMIT 1
+            """, (source, self._rel(source))).fetchone()
+        return dict(row) if row else None
+
+    def document_by_sha(self, sha256: str) -> Optional[dict]:
+        """按内容 SHA 查找已索引文档，用于跳过重复副本。"""
+        if not sha256:
+            return None
+        with self._connect() as conn:
+            row = conn.execute("""
+                SELECT d.id, d.path, d.title, d.mtime, d.size,
+                       (SELECT COUNT(*) FROM rag_chunks c
+                        WHERE c.document_id=d.id) AS chunks
+                FROM documents d WHERE d.sha256=? AND d.kind!='url'
+                ORDER BY d.id DESC LIMIT 1
+            """, (sha256,)).fetchone()
+        return dict(row) if row else None
+
     def document_indexed(self, source: str, sha256: str = "") -> Optional[dict]:
         with self._connect() as conn:
             row = conn.execute("""
                 SELECT d.id, d.path, d.title,
                        (SELECT COUNT(*) FROM rag_chunks c WHERE c.document_id=d.id) AS chunks
-                FROM documents d WHERE d.source=?
+                FROM documents d WHERE d.source=? OR d.path=?
                 ORDER BY d.id DESC LIMIT 1
-            """, (source,)).fetchone()
+            """, (source, self._rel(source))).fetchone()
             if not row:
                 return None
-            if sha256 and row["chunks"]:
+            if sha256:
                 doc_sha = conn.execute("SELECT sha256 FROM documents WHERE id=?",
                                        (row["id"],)).fetchone()
                 if doc_sha and doc_sha[0] == sha256:
@@ -559,6 +619,39 @@ class RagStore:
                 "SELECT * FROM rag_images WHERE document_id=? ORDER BY page,image_index LIMIT ?",
                 (document_id, max(1, min(50, limit)))).fetchall()
         return [dict(row) for row in rows]
+
+    def prune_images(self, max_age_days: int = 30) -> int:
+        """清理 temp/rag_images 中过期或已丢失的图片记录。"""
+        root = os.path.join(os.path.dirname(self.kb.root), "temp", "rag_images")
+        cutoff = time.time() - max_age_days * 86400
+        removed = 0
+        with self._connect() as conn:
+            rows = conn.execute("SELECT id, path FROM rag_images").fetchall()
+            for row in rows:
+                path = str(row["path"] or "")
+                try:
+                    stat = os.stat(path)
+                except OSError:
+                    conn.execute("DELETE FROM rag_images WHERE id=?", (row["id"],))
+                    removed += 1
+                    continue
+                if stat.st_mtime < cutoff or stat.st_size < 4096:
+                    try:
+                        os.remove(path)
+                    except OSError:
+                        pass
+                    conn.execute("DELETE FROM rag_images WHERE id=?", (row["id"],))
+                    removed += 1
+            conn.commit()
+        if os.path.isdir(root):
+            for name in os.listdir(root):
+                folder = os.path.join(root, name)
+                if os.path.isdir(folder) and not os.listdir(folder):
+                    try:
+                        os.rmdir(folder)
+                    except OSError:
+                        pass
+        return removed
 
     def stats(self) -> dict:
         with self._connect() as conn:
@@ -601,10 +694,26 @@ class RagIngestor:
                    tags: str = "", ocr_images: bool = False,
                    force: bool = False) -> dict:
         path = os.path.abspath(os.path.expanduser(path))
-        sha = self._file_sha(path)
-        existing = self.store.document_indexed(path, sha)
-        if existing and not force:
-            return {"document": existing, "skipped": True, "chunks": existing["chunks"]}
+        try:
+            stat = os.stat(path)
+        except OSError:
+            stat = None
+        existing = None if force else self.store.document_meta(path)
+        if existing and stat is not None:
+            same_source = (
+                os.path.normcase(os.path.normpath(str(existing.get("source") or "")))
+                == os.path.normcase(os.path.normpath(path)))
+            if (abs(float(existing.get("mtime") or 0) - stat.st_mtime) < 0.5
+                    and int(existing.get("size") or 0) == stat.st_size
+                    and (existing.get("chunks") or same_source)):
+                return {"document": existing, "skipped": True,
+                        "chunks": int(existing.get("chunks") or 0)}
+        if not force:
+            sha = self._file_sha(path)
+            same = self.store.document_by_sha(sha)
+            if same and same.get("chunks"):
+                return {"document": same, "skipped": True,
+                        "chunks": int(same.get("chunks") or 0)}
         parsed = extract_pdf(path, ocr_images=ocr_images)
         meta = parsed["metadata"]
         title = title or str(meta.get("Title") or Path(path).stem)
@@ -617,9 +726,14 @@ class RagIngestor:
         for page in pages:
             chunks.extend(chunk_text(page["text"], page=page["page"]))
         images = parsed["images"]
-        image_dir = os.path.join(self.kb.root, "images", "papers", str(doc["id"]))
+        # PDF 内嵌图是解析中间产物，放到 temp 并按保留期清理，不进入 database。
+        image_root = os.path.join(os.path.dirname(self.kb.root), "temp", "rag_images")
+        image_dir = os.path.join(image_root, str(doc["id"]))
         os.makedirs(image_dir, exist_ok=True)
         for image in images:
+            # 过滤期刊 logo、图标等小图，避免临时目录被无意义图片塞满。
+            if len(image.data) < 4096:
+                continue
             image_data, image_ext = _normalize_image_bytes(image.data, image.ext)
             name = f"page-{image.page}-img-{image.index}.{image_ext or 'png'}"
             image_path = os.path.join(image_dir, name)
@@ -642,10 +756,25 @@ class RagIngestor:
     def ingest_html(self, path: str, title: str = "", description: str = "",
                     tags: str = "", source_url: str = "") -> dict:
         path = os.path.abspath(os.path.expanduser(path))
+        try:
+            stat = os.stat(path)
+        except OSError:
+            stat = None
+        existing = self.store.document_meta(path)
+        if existing and stat is not None:
+            same_source = (
+                os.path.normcase(os.path.normpath(str(existing.get("source") or "")))
+                == os.path.normcase(os.path.normpath(path)))
+            if (abs(float(existing.get("mtime") or 0) - stat.st_mtime) < 0.5
+                    and int(existing.get("size") or 0) == stat.st_size
+                    and (existing.get("chunks") or same_source)):
+                return {"document": existing, "skipped": True,
+                        "chunks": int(existing.get("chunks") or 0)}
         sha = self._file_sha(path)
-        existing = self.store.document_indexed(path, sha)
-        if existing:
-            return {"document": existing, "skipped": True, "chunks": existing["chunks"]}
+        same = self.store.document_by_sha(sha)
+        if same and same.get("chunks"):
+            return {"document": same, "skipped": True,
+                    "chunks": int(same.get("chunks") or 0)}
         with open(path, "r", encoding="utf-8", errors="replace") as handle:
             raw = handle.read()
         page_title, text = extract_html(raw, source_url)
@@ -684,10 +813,25 @@ class RagIngestor:
     def ingest_text(self, path: str, title: str = "", description: str = "",
                     tags: str = "") -> dict:
         path = os.path.abspath(os.path.expanduser(path))
+        try:
+            stat = os.stat(path)
+        except OSError:
+            stat = None
+        existing = self.store.document_meta(path)
+        if existing and stat is not None:
+            same_source = (
+                os.path.normcase(os.path.normpath(str(existing.get("source") or "")))
+                == os.path.normcase(os.path.normpath(path)))
+            if (abs(float(existing.get("mtime") or 0) - stat.st_mtime) < 0.5
+                    and int(existing.get("size") or 0) == stat.st_size
+                    and (existing.get("chunks") or same_source)):
+                return {"document": existing, "skipped": True,
+                        "chunks": int(existing.get("chunks") or 0)}
         sha = self._file_sha(path)
-        existing = self.store.document_indexed(path, sha)
-        if existing:
-            return {"document": existing, "skipped": True, "chunks": existing["chunks"]}
+        same = self.store.document_by_sha(sha)
+        if same and same.get("chunks"):
+            return {"document": same, "skipped": True,
+                    "chunks": int(same.get("chunks") or 0)}
         with open(path, "r", encoding="utf-8", errors="replace") as handle:
             text = handle.read()
         doc = self.kb.add_file(path, category="markdown", title=title or Path(path).stem,
@@ -717,37 +861,105 @@ class RagIngestor:
         return {"urls": done, "errors": errors}
 
     def ingest_directory(self, folder: str, recursive: bool = True,
-                         ocr_images: bool = False, force: bool = False) -> dict:
+                         ocr_images: bool = False, force: bool = False,
+                         progress=None) -> dict:
         folder = os.path.abspath(folder)
-        count = errors = 0
+        count = errors = skipped = 0
         skip_files = {"catalog.json", "index.sqlite3",
                       "index.sqlite3-wal", "index.sqlite3-shm"}
-        for dirpath, dirs, files in os.walk(folder):
+        files: list[str] = []
+        for dirpath, dirs, names in os.walk(folder):
             # 密码库和自动生成的元文件不应进入 RAG。
             dirs[:] = [name for name in dirs if name.lower() != "passwords"]
             if not recursive and os.path.abspath(dirpath) != folder:
                 continue
-            for name in files:
+            for name in names:
                 lower = name.lower()
                 if lower in skip_files:
                     continue
                 if lower.endswith((".md", ".markdown")) and lower.startswith(
                         ("index", "readme")):
                     continue
-                path = os.path.join(dirpath, name)
-                try:
-                    if lower.endswith(".pdf"):
-                        self.ingest_pdf(path, ocr_images=ocr_images, force=force)
-                        count += 1
-                    elif lower.endswith((".html", ".htm")):
-                        self.ingest_html(path)
-                        count += 1
-                    elif lower.endswith((".txt", ".md", ".markdown")):
-                        self.ingest_text(path)
-                        count += 1
-                except Exception:                                 # noqa: BLE001
-                    errors += 1
-        return {"documents": count, "errors": errors,
+                if lower.endswith((".pdf", ".html", ".htm", ".txt",
+                                   ".md", ".markdown")):
+                    files.append(os.path.join(dirpath, name))
+
+        meta_map: dict[str, dict] = {}
+        with self.store._connect() as conn:
+            rows = conn.execute("""
+                SELECT d.source AS source, d.path AS path, d.mtime AS mtime,
+                       d.size AS size,
+                       (SELECT COUNT(*) FROM rag_chunks c
+                        WHERE c.document_id=d.id) AS chunks
+                FROM documents d
+            """).fetchall()
+        for row in rows:
+            for value in (str(row["source"] or ""), str(row["path"] or "")):
+                if not value or "://" in value:
+                    continue
+                full = (value if os.path.isabs(value)
+                        else os.path.join(self.kb.root, value))
+                key = os.path.normcase(os.path.normpath(full))
+                meta_map[key] = dict(row)
+
+        total = len(files)
+        for index, path in enumerate(files, 1):
+            name = os.path.basename(path)
+            norm = os.path.normcase(os.path.normpath(path))
+            meta = meta_map.get(norm)
+            try:
+                stat = os.stat(path)
+            except OSError:
+                stat = None
+            if not force and meta and stat is not None:
+                same_source = (
+                    os.path.normcase(os.path.normpath(str(meta.get("source") or "")))
+                    == norm)
+                if (abs(float(meta.get("mtime") or 0) - stat.st_mtime) < 0.5
+                        and int(meta.get("size") or 0) == stat.st_size
+                        and (meta.get("chunks") or same_source)):
+                    skipped += 1
+                    if progress:
+                        progress(index, total, name)
+                    continue
+            lower = path.lower()
+            try:
+                if lower.endswith(".pdf"):
+                    result = self.ingest_pdf(path, ocr_images=ocr_images,
+                                             force=force)
+                elif lower.endswith((".html", ".htm")):
+                    result = self.ingest_html(path)
+                else:
+                    result = self.ingest_text(path)
+                if result.get("skipped"):
+                    skipped += 1
+                else:
+                    count += 1
+            except Exception:                                 # noqa: BLE001
+                errors += 1
+            if progress:
+                progress(index, total, name)
+
+        # 清理源文件已被删除的文档，避免向量索引里留下孤儿记录。
+        valid = {os.path.normcase(os.path.normpath(path)) for path in files}
+        with self.store._connect() as conn:
+            rows = conn.execute(
+                "SELECT id, source FROM documents WHERE kind!='url'").fetchall()
+            for row in rows:
+                source = str(row["source"] or "")
+                if not source or "://" in source:
+                    continue
+                key = os.path.normcase(os.path.normpath(source))
+                if key in valid:
+                    continue
+                source_path = (source if os.path.isabs(source)
+                               else os.path.join(self.kb.root, source))
+                if not os.path.isfile(source_path):
+                    self.store._delete_doc_chunks(conn, row["id"])
+                    conn.execute("DELETE FROM documents WHERE id=?", (row["id"],))
+            conn.commit()
+
+        return {"documents": count, "skipped": skipped, "errors": errors,
                 "stats": self.store.stats()}
 
 

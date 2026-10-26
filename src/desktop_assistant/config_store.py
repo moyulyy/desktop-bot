@@ -18,7 +18,7 @@ import tempfile
 from typing import Any
 
 APP_NAME = "AI 桌面助手"
-APP_VERSION = "2.0.0"
+APP_VERSION = "2.1.0"
 PACKAGE_DIR = os.path.dirname(os.path.abspath(__file__))
 SRC_DIR = os.path.dirname(PACKAGE_DIR)
 PROJECT_ROOT = os.path.dirname(SRC_DIR)

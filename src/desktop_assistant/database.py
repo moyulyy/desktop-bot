@@ -16,7 +16,7 @@ import shutil
 import sqlite3
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 from urllib.parse import urlparse
 
 # 分类目录。urls/passwords 是逻辑分类，不保存普通文件。
@@ -211,7 +211,10 @@ class KnowledgeBase:
         if source == root or source.startswith(root + os.sep):
             try:
                 rel = os.path.relpath(source, root)
-                if rel.split(os.sep)[0] == category:
+                top = rel.split(os.sep)[0]
+                # 已在知识库内：分类一致，或位于 cer_txt/txt/urls 等辅助目录时
+                # 保持原位，避免每次整理都复制出 -1/-2 副本。
+                if top == category or top not in CATEGORIES:
                     return source
             except ValueError:
                 pass
@@ -492,7 +495,8 @@ class KnowledgeBase:
             results.append(record)
         return results
 
-    def reindex(self) -> dict:
+    def reindex(self,
+                progress: Optional[Callable[[int, int, str], None]] = None) -> dict:
         touched = 0
         with self._connect() as conn:
             # 自动生成的目录/说明副本不应成为可检索的知识库内容。
@@ -501,6 +505,8 @@ class KnowledgeBase:
                 "OR path GLOB 'markdown/README*'")
             touched += cur.rowcount
             rows = conn.execute("SELECT * FROM documents").fetchall()
+            existing = {row["path"]: dict(row) for row in rows
+                        if row["kind"] != "url"}
             for row in rows:
                 if row["kind"] == "url":
                     continue
@@ -509,26 +515,51 @@ class KnowledgeBase:
                     conn.execute("DELETE FROM documents WHERE id=?", (row["id"],))
                     touched += 1
             conn.commit()
+
+        files: list[tuple[str, str]] = []
         for category in CATEGORIES:
             if category in ("urls", "passwords"):
                 continue
             folder = os.path.join(self.root, category)
             if not os.path.isdir(folder):
                 continue
-            for dirpath, _dirs, files in os.walk(folder):
-                for name in files:
+            for dirpath, _dirs, names in os.walk(folder):
+                # RAG 抽取的论文图片由 rag_images 管理，避免重复进入知识库。
+                if category == "images":
+                    rel_dir = os.path.relpath(dirpath, folder).replace(os.sep, "/")
+                    if rel_dir == "papers" or rel_dir.startswith("papers/"):
+                        continue
+                for name in names:
                     if (name.startswith(("INDEX", "README"))
                             and name.lower().endswith((".md", ".markdown"))):
                         continue
                     path = os.path.join(dirpath, name)
-                    if not os.path.isfile(path):
-                        continue
-                    old = self.get(os.path.relpath(path, self.root).replace(os.sep, "/"))
-                    self.add_file(
-                        path, category, title=(old or {}).get("title", ""),
-                        description=(old or {}).get("description", ""),
-                        tags=(old or {}).get("tags", ""), copy=False, _export=False)
-                    touched += 1
+                    if os.path.isfile(path):
+                        files.append((category, path))
+
+        total = len(files)
+        for index, (category, path) in enumerate(files, 1):
+            name = os.path.basename(path)
+            rel = os.path.relpath(path, self.root).replace(os.sep, "/")
+            old = existing.get(rel)
+            if old is not None:
+                try:
+                    stat = os.stat(path)
+                except OSError:
+                    stat = None
+                if (stat is not None
+                        and abs(float(old.get("mtime") or 0) - stat.st_mtime) < 0.5
+                        and int(old.get("size") or 0) == stat.st_size):
+                    if progress:
+                        progress(index, total, name)
+                    continue
+            self.add_file(
+                path, category, title=(old or {}).get("title", ""),
+                description=(old or {}).get("description", ""),
+                tags=(old or {}).get("tags", ""), copy=False, _export=False)
+            touched += 1
+            if progress:
+                progress(index, total, name)
         self.export_catalog()
         return {"reindexed": touched, "stats": self.stats()}
 

@@ -7,6 +7,9 @@ trafilatura>=1.12
 beautifulsoup4>=4.12
 # 本地 embedding（首次运行会下载模型；缓存见 embedding_cache）
 fastembed>=0.4
+# 可选 GPU embedding：安装后替换 CPU 版 onnxruntime（二选一）
+#   onnxruntime-directml  → Windows/DirectML，无需 CUDA
+#   onnxruntime-gpu       → 需要匹配的 CUDA/cuDNN
 # 大规模向量索引；不可用时退化为 SQLite 向量扫描
 sqlite-vec>=0.1.6
 numpy>=1.26

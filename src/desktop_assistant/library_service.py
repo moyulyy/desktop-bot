@@ -159,18 +159,27 @@ class LibraryOrganizer:
             temp_paths = self.temp.promote(self.root)
         if progress:
             progress(8, "正在重建知识库索引")
-        self.kb.reindex()
+        self.kb.reindex(
+            progress=(lambda done, total, name: progress(
+                8 + int(done / max(1, total) * 10), f"正在更新索引 {name}"))
+            if progress else None)
         if progress:
             progress(18, "正在解析 PDF / HTML / 文本")
-        result = self.rag.ingest_directory(self.root)
+        result = self.rag.ingest_directory(
+            self.root,
+            progress=(lambda done, total, name: progress(
+                18 + int(done / max(1, total) * 76), f"正在解析 {name}"))
+            if progress else None)
         if progress:
             progress(96, "正在更新向量索引与目录")
+        pruned = self.rag.store.prune_images(30)
         self.kb.reindex()
         if include_temp:
             self.temp.clear()
         if progress:
             progress(100, "知识库已更新")
         return {"result": result, "temp_files": len(temp_paths),
+                "pruned_images": pruned,
                 "stats": self.rag.store.stats()}
 
 
