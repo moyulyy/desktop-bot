@@ -551,15 +551,24 @@ class Agent:
 
     # ---- 请求 ---------------------------------------------------------- #
     def _history_for_request(self) -> list[dict]:
-        """控制上下文长度；截断时从一条 user 消息开始，避免孤立的 tool 消息。"""
+        """控制上下文长度；裁剪时保留完整的 assistant/tool_calls 链。
+
+        一次提问可能产生几十个工具调用，消息数超过上限。此时不能简单取
+        ``history[-limit:]``，否则可能从一条 tool 消息开始，OpenAI 会报
+        “Messages with role 'tool' must be a response to a preceding message
+        with 'tool_calls'”。优先从最近一条 user 消息开始；找不到时才丢弃
+        开头的孤立 tool 消息。
+        """
+        history = list(self.history)
         limit = self.options.max_history_messages
-        if limit <= 0 or len(self.history) <= limit:
-            return list(self.history)
-        tail = self.history[-limit:]
-        for index, message in enumerate(tail):
-            if message.get("role") == "user":
-                return tail[index:]
-        return tail
+        if limit > 0 and len(history) > limit:
+            for index in range(len(history) - 1, -1, -1):
+                if history[index].get("role") == "user":
+                    return history[index:]
+        index = 0
+        while index < len(history) and history[index].get("role") == "tool":
+            index += 1
+        return history[index:]
 
     def _payload(self, stream: bool) -> dict:
         messages = ([{"role": "system", "content": self.options.system_prompt}]
@@ -1261,7 +1270,11 @@ def _open_url(_cwd: str):
         url = args.get("url", "")
         if not url:
             return ToolResult("缺少 url。", is_error=True)
-        ok = webbrowser.open(url)
+        try:
+            os.startfile(url)                              # type: ignore[attr-defined]
+            ok = True
+        except (AttributeError, OSError):
+            ok = webbrowser.open(url)
         return ToolResult(f"已在浏览器打开：{url}" if ok else f"无法打开：{url}",
                           is_error=not ok)
     return handler

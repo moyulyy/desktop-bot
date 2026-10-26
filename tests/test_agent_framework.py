@@ -199,6 +199,37 @@ def test_history_trimming_starts_at_user(monkeypatch):
     assert len(trimmed) == 3
 
 
+def test_history_trimming_keeps_long_tool_chain():
+    """一次提问产生很多工具调用时，不能截断出孤立的 tool 消息。"""
+    agent = Agent(AgentOptions(api_key="x", tools=[_echo_tool()],
+                               max_history_messages=4))
+    agent.history = [{"role": "user", "content": "查文献"}]
+    for index in range(6):
+        call_id = f"call_{index}"
+        agent.history.append({
+            "role": "assistant", "content": "",
+            "tool_calls": [_tool_call("echo", {"text": str(index)}, call_id)],
+        })
+        agent.history.append({"role": "tool", "tool_call_id": call_id,
+                              "content": f"echo:{index}"})
+    trimmed = agent._history_for_request()
+    assert trimmed[0]["role"] == "user"
+    assert len(trimmed) == len(agent.history)
+    assert all(message.get("role") != "tool" for message in trimmed[:1])
+
+
+def test_history_trimming_drops_leading_orphan_tool():
+    agent = Agent(AgentOptions(api_key="x", tools=[_echo_tool()],
+                               max_history_messages=2))
+    agent.history = [
+        {"role": "tool", "tool_call_id": "old", "content": "orphan"},
+        {"role": "assistant", "content": "reply"},
+    ]
+    trimmed = agent._history_for_request()
+    assert trimmed
+    assert trimmed[0]["role"] != "tool"
+
+
 def test_ask_user_tool_round_trip(monkeypatch):
     responses = [
         {"content": "", "tool_calls": [
