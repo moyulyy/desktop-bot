@@ -25,6 +25,12 @@ from typing import Optional
 
 IS_WINDOWS = os.name == "nt"
 
+# Dedicated instance for this project. Starting Everything without an explicit
+# instance name makes an already-running interactive instance swallow the new
+# process; if that instance runs elevated, a non-elevated client cannot use its
+# SDK3 pipe. A dedicated instance avoids both problems.
+DEFAULT_INSTANCE_NAME = "desktop-bot"
+
 
 class EverythingError(RuntimeError):
     pass
@@ -49,6 +55,10 @@ if IS_WINDOWS:
     _user32.GetClassNameW.argtypes = [wintypes.HWND, wintypes.LPWSTR, ctypes.c_int]
     _user32.GetClassNameW.restype = ctypes.c_int
     _user32.ShowWindow.argtypes = [wintypes.HWND, ctypes.c_int]
+    # Async variant: ShowWindow can block on a window whose UI thread is busy
+    # (e.g. Everything still building its index), which would hang the caller.
+    _user32.ShowWindowAsync.argtypes = [wintypes.HWND, ctypes.c_int]
+    _user32.ShowWindowAsync.restype = wintypes.BOOL
 
 
 def _window_classes() -> list[tuple[int, str]]:
@@ -82,7 +92,7 @@ def _hide_everything_windows():
         upper = name.upper()
         if upper.startswith("EVERYTHING_") and not upper.startswith(
                 "EVERYTHING_TASKBAR_NOTIFICATION"):
-            _user32.ShowWindow(hwnd, 0)
+            _user32.ShowWindowAsync(hwnd, 0)
 
 
 def _find_everything_exe(project_root: str) -> Optional[str]:
@@ -166,11 +176,12 @@ class EverythingClient:
 
     def __init__(self, project_root: str, exe_path: Optional[str] = None,
                  dll_path: Optional[str] = None, instance_name: Optional[str] = None,
-                 timeout: float = 12.0):
+                 timeout: float = 30.0):
         self.project_root = os.path.abspath(project_root)
         self.exe_path = exe_path or _find_everything_exe(self.project_root)
         self.dll_path = dll_path or _find_sdk_dll(self.project_root, self.exe_path)
         self.instance_name = instance_name
+        self.launch_instance = instance_name or DEFAULT_INSTANCE_NAME
         self.timeout = timeout
         self._sdk: Optional[_EverythingSDK] = None
         self._client = None
@@ -199,6 +210,7 @@ class EverythingClient:
         names: list[Optional[str]] = []
         if self.instance_name:
             names.append(self.instance_name)
+        names.append(self.launch_instance)
         names.append("1.5a")
         names.extend(_instance_names_from_windows())
         names.extend([None, "1.5"])
@@ -239,7 +251,7 @@ class EverythingClient:
             startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
             startupinfo.wShowWindow = 0
             subprocess.Popen(
-                [self.exe_path],
+                [self.exe_path, "-instance", self.launch_instance],
                 cwd=os.path.dirname(self.exe_path),
                 startupinfo=startupinfo,
                 close_fds=True,
@@ -255,8 +267,9 @@ class EverythingClient:
                 return
             time.sleep(0.25)
         self._start_error = (
-            "Everything 已启动但 SDK 无法连接。请手动打开 Everything，"
-            "确认版本为 1.5 且索引加载完成。")
+            "Everything 已启动但 SDK 无法连接。若系统中已有以管理员身份运行的 "
+            "Everything，普通权限进程无法通过 IPC 访问；请退出该实例，或以管理员"
+            "身份运行本程序。")
         raise EverythingError(self._start_error)
 
     def search(self, query: str, max_results: int = 20) -> list[SearchResult]:

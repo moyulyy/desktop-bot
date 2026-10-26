@@ -88,6 +88,33 @@ def infer_category(path: str, explicit: str = "") -> str:
     return "inbox"
 
 
+def fts_query_variants(query: str) -> list[str]:
+    """FTS5/trigram 查询变体：短语 → 词项 AND → 原样。
+
+    trigram tokenizer 对整句加引号要求连续匹配，像
+    ``lattice oxygen mechanism`` 这类跨行或带断词的论文文本会查不到；
+    退回到词项 AND 能显著提高召回。短于 3 字符的英文词项不会被
+    trigram 索引，直接跳过。
+    """
+    query = (query or "").strip()
+    if not query:
+        return []
+    escaped = query.replace('"', '""')
+    variants = [f'"{escaped}"']
+    terms = [term for term in re.split(r"\s+", query) if term]
+    usable = []
+    for term in terms:
+        if len(term) >= 3 or re.search(r"[\u4e00-\u9fff]", term):
+            usable.append(term.replace('"', '""'))
+    if len(usable) >= 2:
+        and_query = " AND ".join(f'"{term}"' for term in usable)
+        if and_query not in variants:
+            variants.append(and_query)
+    if query not in variants:
+        variants.append(query)
+    return variants
+
+
 class KnowledgeBase:
     def __init__(self, root: str):
         self.root = os.path.abspath(os.path.expanduser(str(root or "database")))
@@ -419,25 +446,37 @@ class KnowledgeBase:
         limit = max(1, min(100, int(limit or 10)))
         rows = []
         if self.has_fts:
-            fts_query = '"' + query.replace('"', '""') + '"'
-            sql = """SELECT d.* FROM documents_fts f JOIN documents d ON d.id=f.rowid
-                     WHERE documents_fts MATCH ?"""
-            params = [fts_query]
-            if category and category != "all":
-                sql += " AND d.category=?"
-                params.append(category)
-            sql += " ORDER BY bm25(documents_fts) LIMIT ?"
-            params.append(limit)
-            try:
-                with self._connect() as conn:
-                    rows = conn.execute(sql, params).fetchall()
-            except sqlite3.OperationalError:
-                rows = []
+            seen: dict[int, object] = {}
+            for fts_query in fts_query_variants(query):
+                sql = """SELECT d.* FROM documents_fts f JOIN documents d ON d.id=f.rowid
+                         WHERE documents_fts MATCH ?
+                           AND d.path NOT LIKE 'markdown/INDEX%'"""
+                params: list = [fts_query]
+                if category and category != "all":
+                    sql += " AND d.category=?"
+                    params.append(category)
+                sql += """ ORDER BY bm25(documents_fts) + CASE
+                             WHEN d.path LIKE 'markdown/chat-%' THEN 8
+                             WHEN d.path LIKE 'markdown/README%' THEN 8
+                             ELSE 0 END
+                           LIMIT ?"""
+                params.append(limit)
+                try:
+                    with self._connect() as conn:
+                        part = conn.execute(sql, params).fetchall()
+                except sqlite3.OperationalError:
+                    part = []
+                for row in part:
+                    seen.setdefault(row["id"], row)
+                if len(seen) >= limit:
+                    break
+            rows = list(seen.values())[:limit]
         if not rows:
             like = f"%{query}%"
             sql = """SELECT d.* FROM documents d WHERE
                      (d.title LIKE ? OR d.description LIKE ? OR d.tags LIKE ?
-                      OR d.text LIKE ? OR d.path LIKE ?)"""
+                      OR d.text LIKE ? OR d.path LIKE ?)
+                     AND d.path NOT LIKE 'markdown/INDEX%'"""
             params = [like, like, like, like, like]
             if category and category != "all":
                 sql += " AND d.category=?"
@@ -456,6 +495,11 @@ class KnowledgeBase:
     def reindex(self) -> dict:
         touched = 0
         with self._connect() as conn:
+            # 自动生成的目录/说明副本不应成为可检索的知识库内容。
+            cur = conn.execute(
+                "DELETE FROM documents WHERE path GLOB 'markdown/INDEX*' "
+                "OR path GLOB 'markdown/README*'")
+            touched += cur.rowcount
             rows = conn.execute("SELECT * FROM documents").fetchall()
             for row in rows:
                 if row["kind"] == "url":
@@ -473,6 +517,9 @@ class KnowledgeBase:
                 continue
             for dirpath, _dirs, files in os.walk(folder):
                 for name in files:
+                    if (name.startswith(("INDEX", "README"))
+                            and name.lower().endswith((".md", ".markdown"))):
+                        continue
                     path = os.path.join(dirpath, name)
                     if not os.path.isfile(path):
                         continue

@@ -21,7 +21,7 @@ from pathlib import Path
 from typing import Iterable, Optional
 from urllib.parse import urlparse
 
-from .database import KnowledgeBase
+from .database import KnowledgeBase, fts_query_variants
 
 DEFAULT_MODEL = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
 DEFAULT_CHUNK_TOKENS = 700
@@ -446,21 +446,35 @@ class RagStore:
         return {row["id"]: dict(row) for row in rows}
 
     def search_fts(self, query: str, limit: int = 20) -> list[tuple[int, float]]:
+        sql = """
+            SELECT c.id AS id, bm25(rag_chunks_fts) AS score
+            FROM rag_chunks_fts
+            JOIN rag_chunks c ON c.id = rag_chunks_fts.rowid
+            JOIN documents d ON d.id = c.document_id
+            WHERE rag_chunks_fts MATCH ?
+              AND d.path NOT LIKE 'markdown/INDEX%'
+              AND d.path NOT LIKE 'markdown/chat-%'
+              AND d.path NOT LIKE 'markdown/README%'
+            ORDER BY bm25(rag_chunks_fts)
+            LIMIT ?
+        """
         with self._connect() as conn:
-            try:
-                rows = conn.execute("""
-                    SELECT rowid, bm25(rag_chunks_fts) AS score
-                    FROM rag_chunks_fts WHERE rag_chunks_fts MATCH ?
-                    ORDER BY score LIMIT ?
-                """, ('"' + query.replace('"', '""') + '"', limit)).fetchall()
+            for fts_query in fts_query_variants(query):
+                try:
+                    rows = conn.execute(sql, (fts_query, limit)).fetchall()
+                except sqlite3.OperationalError:
+                    rows = []
                 if rows:
-                    return [(row["rowid"], -float(row["score"])) for row in rows]
-            except sqlite3.OperationalError:
-                pass
+                    return [(row["id"], -float(row["score"])) for row in rows]
             like = f"%{query}%"
             rows = conn.execute("""
-                SELECT id, 0.0 AS score FROM rag_chunks
-                WHERE text LIKE ? OR section LIKE ? LIMIT ?
+                SELECT c.id, 0.0 AS score FROM rag_chunks c
+                JOIN documents d ON d.id=c.document_id
+                WHERE (c.text LIKE ? OR c.section LIKE ?)
+                  AND d.path NOT LIKE 'markdown/INDEX%'
+                  AND d.path NOT LIKE 'markdown/chat-%'
+                  AND d.path NOT LIKE 'markdown/README%'
+                LIMIT ?
             """, (like, like, limit)).fetchall()
         return [(row["id"], 0.0) for row in rows]
 
@@ -478,7 +492,15 @@ class RagStore:
                                 for row in rows]
                 except sqlite3.OperationalError:
                     pass
-            rows = conn.execute("SELECT chunk_id, vector, dim FROM rag_embeddings").fetchall()
+            rows = conn.execute("""
+                SELECT e.chunk_id, e.vector, e.dim
+                FROM rag_embeddings e
+                JOIN rag_chunks c ON c.id = e.chunk_id
+                JOIN documents d ON d.id = c.document_id
+                WHERE d.path NOT LIKE 'markdown/INDEX%'
+                  AND d.path NOT LIKE 'markdown/chat-%'
+                  AND d.path NOT LIKE 'markdown/README%'
+            """).fetchall()
         scored = []
         for row in rows:
             if row["dim"] != dim:
@@ -497,7 +519,10 @@ class RagStore:
             scores[chunk_id] = scores.get(chunk_id, 0.0) + 1.0 / (60 + rank + 1)
         ordered = sorted(scores, key=scores.get, reverse=True)[:limit]
         records = self._chunks_by_ids(ordered)
-        return [records[chunk_id] for chunk_id in ordered if chunk_id in records]
+        return [records[chunk_id] for chunk_id in ordered
+                if chunk_id in records
+                and not str(records[chunk_id].get("path") or "").startswith(
+                    ("markdown/INDEX", "markdown/chat-", "markdown/README"))]
 
     def document_indexed(self, source: str, sha256: str = "") -> Optional[dict]:
         with self._connect() as conn:
@@ -695,19 +720,29 @@ class RagIngestor:
                          ocr_images: bool = False, force: bool = False) -> dict:
         folder = os.path.abspath(folder)
         count = errors = 0
-        for dirpath, _dirs, files in os.walk(folder):
+        skip_files = {"catalog.json", "index.sqlite3",
+                      "index.sqlite3-wal", "index.sqlite3-shm"}
+        for dirpath, dirs, files in os.walk(folder):
+            # 密码库和自动生成的元文件不应进入 RAG。
+            dirs[:] = [name for name in dirs if name.lower() != "passwords"]
             if not recursive and os.path.abspath(dirpath) != folder:
                 continue
             for name in files:
+                lower = name.lower()
+                if lower in skip_files:
+                    continue
+                if lower.endswith((".md", ".markdown")) and lower.startswith(
+                        ("index", "readme")):
+                    continue
                 path = os.path.join(dirpath, name)
                 try:
-                    if name.lower().endswith(".pdf"):
+                    if lower.endswith(".pdf"):
                         self.ingest_pdf(path, ocr_images=ocr_images, force=force)
                         count += 1
-                    elif name.lower().endswith((".html", ".htm")):
+                    elif lower.endswith((".html", ".htm")):
                         self.ingest_html(path)
                         count += 1
-                    elif name.lower().endswith((".txt", ".md", ".markdown")):
+                    elif lower.endswith((".txt", ".md", ".markdown")):
                         self.ingest_text(path)
                         count += 1
                 except Exception:                                 # noqa: BLE001

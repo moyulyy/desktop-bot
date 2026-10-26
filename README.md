@@ -228,6 +228,14 @@ PYTHONPATH=src python -m desktop_assistant
 - `content:"Q3复盘"`：内容搜索（需在 Everything 中启用内容索引）；
 - 首次检索会自动启动 Everything 并隐藏窗口，只读，不修改文件。
 
+项目使用独立实例名 **`desktop-bot`** 启动 Everything，不会和系统中已有的实例混用。
+`Everything-desktop-bot.ini` 等运行文件由程序自动生成并已加入 `.gitignore`。首次启动
+需要建立索引，第一次搜索可能稍慢；索引完成后的检索通常很快。
+
+如果系统里已有以**管理员权限**运行的 Everything，普通权限的本程序无法通过 SDK3
+连接它（named-pipe 权限限制），程序会自动启动上述独立实例；也可以以管理员身份
+运行本程序后复用系统实例。
+
 如果内容搜索没有结果，请在 Everything 的「工具 → 选项 → 内容」中开启内容索引。
 
 ### computer：电脑操作与临时工作空间
@@ -294,6 +302,9 @@ database/
 （trigram，支持中文子串），不需要外部服务；设计上借鉴 gbrain 的“有来源、可纠正、
 可检索”思路。密码库使用当前 Windows 用户的 DPAPI 加密，只在本机可用。
 
+自动生成的 `INDEX.md`、`README.md` 及其历史副本不会进入知识库/RAG 索引；聊天记录
+仍可在知识库中检索，但会降权，不会挤占同名的文件结果。
+
 ### 论文与 HTML RAG
 
 `rag` 子智能体面向中文/英文论文和网页，默认按 1 万篇论文的规模设计：
@@ -303,6 +314,9 @@ database/
 - 分块：约 700 tokens、100 overlap，保留页码、章节和来源；
 - Embedding：本地 `fastembed`，默认 `sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2`；模型缓存默认 `models/`；
 - 检索：SQLite FTS5 + 向量召回，RRF 融合，返回标题、路径/URL、页码和片段；
+  查询先按短语匹配，未命中时自动退化为词项 AND，避免多词查询漏检；
+- 过滤：自动生成的 `INDEX.md`/`README.md` 目录和 `chat-*.md` 对话记录不参与
+  文献检索，避免目录/聊天记录挤占论文结果；
 - 报告：优先使用结构化 `literature_report` 工具，按文献传标题、PDF、页码、摘要和图片；
   工具自动生成 PDF 短链接、绝对路径、浅色卡片和可缩放全屏图片；
 - 审核：`review_literature_items` 会移除不存在的图片、缺少 Fig/Figure 图注的图片和
@@ -611,8 +625,14 @@ python -m desktop_assistant
 不会。窗口使用 `Qt.Tool`，只保留系统托盘图标。
 
 **Q：需要安装 Everything 吗？**
-项目自带 Everything 1.5 便携版与 SDK3 DLL，`finder` 首次检索会自动启动；若需内容搜索，
-请在 Everything 中开启内容索引。
+项目自带 Everything 1.5 便携版与 SDK3 DLL，`finder` 首次检索会自动启动独立的
+`desktop-bot` 实例；若需内容搜索，请在 Everything 中开启内容索引。
+
+**Q：Everything 提示“SDK 无法连接”或搜不到文件？**
+先确认系统里没有以**管理员权限**运行的 Everything 占用了 IPC（普通权限程序无法连接），
+程序会自动改用自带的 `desktop-bot` 实例。首次启动需要建立索引，稍等片刻再搜索。
+如果仍然失败，检查 `vendor/everything/` 下的 `Everything.exe`、`Everything3_x64.dll`
+是否存在，以及 Everything 的索引是否已加载完成。
 
 **Q：把项目复制到新机器 / 新路径后需要改什么？**
 一般只需保证 Python 环境可用。`workspace`、`database`、`embedding_cache` 都支持相对

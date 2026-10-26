@@ -18,6 +18,9 @@ models/
 Umi-OCR_Paddle_v2.0.0/
 tools/
 
+# Everything 运行实例生成的本地配置/索引（finder 自动创建）
+vendor/everything/Everything-desktop-bot.*
+
 # 临时脚本、调试输出和扫描结果统一放在 temp/（已整体忽略）。
 # 项目根目录只保留源码、配置和启动脚本，不要在这里新建临时文件。
 
